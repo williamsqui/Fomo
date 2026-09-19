@@ -72,9 +72,4 @@ jobs:
           path: state
           key: scanner-state-${{ github.run_id }}
 
-      # GitHub pauses scheduled workflows in repos with no activity for 60 days; this prevents it
-      - name: Keep schedule alive
-        if: github.event_name == 'schedule'
-        uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          use_api: true
+
