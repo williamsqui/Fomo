@@ -1,0 +1,80 @@
+name: FOMO scanner
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub can delay runs a few minutes when busy)
+  workflow_dispatch: {}       # "Run workflow" button for manual runs
+
+concurrency:
+  group: fomo-scanner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # lets the keepalive step stop GitHub pausing the schedule after 60 quiet days
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # state.json (budgets, wallet cursors, trader buys, track record) survives between runs
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: scanner-state-
+
+      - name: Run scanner
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          GETXAPI_KEY: ${{ secrets.GETXAPI_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          LOG_LEVEL: WARNING   # keeps picks out of the (public) run logs
+          # optional: faster/more reliable RPCs (free Alchemy/Ankr/QuickNode URLs)
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+          # settings you can change under Settings -> Secrets and variables -> Variables
+          BANKROLL_USD: ${{ vars.BANKROLL_USD }}
+          DIGEST_TIMES: ${{ vars.DIGEST_TIMES }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          EXIT_ALERTS: ${{ vars.EXIT_ALERTS }}
+          INSTANT_SCORE: ${{ vars.INSTANT_SCORE }}
+          MAX_RUNUP_PCT: ${{ vars.MAX_RUNUP_PCT }}
+          X_MONTHLY_CALLS: ${{ vars.X_MONTHLY_CALLS }}
+          MIN_SEND_SCORE: ${{ vars.MIN_SEND_SCORE }}
+          MIN_MCAP_USD: ${{ vars.MIN_MCAP_USD }}
+          CHAINS: ${{ vars.CHAINS }}
+          FOMO_MONTHLY_CREDITS: ${{ vars.FOMO_MONTHLY_CREDITS }}
+          HELIUS_MONTHLY_CREDITS: ${{ vars.HELIUS_MONTHLY_CREDITS }}
+          LEADERBOARD_REFRESH_HOURS: ${{ vars.LEADERBOARD_REFRESH_HOURS }}
+          TRENDING_REFRESH_HOURS: ${{ vars.TRENDING_REFRESH_HOURS }}
+          THESIS_TOKENS_PER_DAY: ${{ vars.THESIS_TOKENS_PER_DAY }}
+          X_TOKENS_PER_RUN: ${{ vars.X_TOKENS_PER_RUN }}
+        run: python -m scanner.main
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: scanner-state-${{ github.run_id }}
+
+      # GitHub pauses scheduled workflows in repos with no activity for 60 days; this prevents it
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          use_api: true
