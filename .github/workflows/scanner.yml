@@ -56,6 +56,7 @@ jobs:
           X_MONTHLY_CALLS: ${{ vars.X_MONTHLY_CALLS }}
           MIN_SEND_SCORE: ${{ vars.MIN_SEND_SCORE }}
           MIN_MCAP_USD: ${{ vars.MIN_MCAP_USD }}
+          MAX_MCAP_USD: ${{ vars.MAX_MCAP_USD }}
           CHAINS: ${{ vars.CHAINS }}
           FOMO_MONTHLY_CREDITS: ${{ vars.FOMO_MONTHLY_CREDITS }}
           HELIUS_MONTHLY_CREDITS: ${{ vars.HELIUS_MONTHLY_CREDITS }}
