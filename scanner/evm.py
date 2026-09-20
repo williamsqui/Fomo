@@ -210,14 +210,61 @@ def balances(chain, token, wallets):
     return out
 
 
+def apply_snapshot(s, k, price, snap, by_addr, sell_floor=0.0):
+    """Store a holdings snapshot; changes since the previous one become buy/sell events.
+
+    snap: {wallet: token amount} for leaderboard wallets holding the coin now.
+    sell_floor: for partial snapshots (Solana top-20 holders), a wallet missing from the
+    snapshot only counts as a seller if its old balance was well above this floor.
+    """
+    hold = s.setdefault("holdings", {})
+    prev = hold.get(k)
+    now, events = time.time(), 0
+    if prev:
+        for w, amt in snap.items():
+            delta = amt - prev["bal"].get(w, 0.0)
+            t = by_addr.get(w)
+            if t and delta * price >= MIN_EVENT_USD:
+                s["trader_buys"].append({"ts": now, "sig": f"hold-{k}-{w}-{int(now)}", "wallet": w,
+                                         "handle": t["handle"], "rank": t["rank"], "key": k, "side": "buy",
+                                         "amount": delta, "usd": round(delta * price, 2)})
+                events += 1
+        for w, old in prev["bal"].items():
+            new = snap.get(w)
+            if new is None and old * 0.2 <= sell_floor:
+                continue  # just dropped out of a partial snapshot - can't tell if they sold
+            new = new or 0.0
+            t = by_addr.get(w)
+            if t and old > 0 and new < old * 0.2 and (old - new) * price >= MIN_EVENT_USD:
+                s["trader_buys"].append({"ts": now, "sig": f"hold-{k}-{w}-{int(now)}-s", "wallet": w,
+                                         "handle": t["handle"], "rank": t["rank"], "key": k, "side": "sell",
+                                         "amount": old - new, "usd": round((old - new) * price, 2)})
+                events += 1
+    hold[k] = {"ts": now, "bal": snap}
+    return events
+
+
+def holding_events(s, k, price, by_addr, max_age_min=120):
+    """Current holders from the latest snapshot, as 'held' events for scoring (not stored)."""
+    h = (s.get("holdings") or {}).get(k)
+    if not h or time.time() - h["ts"] > max_age_min * 60:
+        return []
+    out = []
+    for w, amt in h["bal"].items():
+        t = by_addr.get(w)
+        if t and amt * price >= MIN_EVENT_USD:
+            out.append({"ts": time.time(), "wallet": w, "handle": t["handle"], "rank": t["rank"], "key": k,
+                        "side": "buy", "amount": amt, "usd": round(amt * price, 2), "held": True})
+    return out
+
+
 def holdings_scan(s, traders, markets, max_per_chain=8):
     """Snapshot leaderboard holdings of EVM candidate coins; diffs become buy/sell events."""
     by_addr = {t["evm"]: t for t in traders if t.get("evm")}
     wallets = list(by_addr)
     if not wallets:
         return 0
-    hold = s.setdefault("holdings", {})
-    now, events = time.time(), 0
+    events = 0
     per_chain = {}
     for k, m in markets.items():
         if m["chain"] != "solana" and m["chain"] in config.EVM_RPC and m["chain"] in config.CHAINS:
@@ -225,41 +272,13 @@ def holdings_scan(s, traders, markets, max_per_chain=8):
     for chain, ms in per_chain.items():
         ms.sort(key=lambda m: -m["volume"].get("h1", 0))
         for m in ms[:max_per_chain]:
-            k, token, price = m["key"], m["address"], m["price"]
             try:
-                raw = balances(chain, token, wallets)
+                raw = balances(chain, m["address"], wallets)
             except RPCError as e:
                 log.info("%s holdings check failed: %s", chain, e)
                 break
-            dec = _decimals(s, chain, token)
-            snap = {w: v / 10 ** dec for w, v in raw.items()}
-            prev = hold.get(k)
-            seen = {e["wallet"] for e in s["trader_buys"] if e["key"] == k and e["side"] == "buy"}
-            for w, amt in snap.items():
-                if not prev and w in seen:  # already counted from transfer logs
-                    continue
-                old = (prev or {}).get("bal", {}).get(w, 0.0)
-                delta = amt - old
-                if delta * price < MIN_EVENT_USD:
-                    continue
-                t = by_addr[w]
-                # first time we see this coin: count current holders, but not as a "fresh" buy
-                ts = now if prev else now - config.LOOKBACK_HOURS * 3600 / 2
-                s["trader_buys"].append({"ts": ts, "sig": f"hold-{k}-{w}-{int(now)}", "wallet": w,
-                                         "handle": t["handle"], "rank": t["rank"], "key": k, "side": "buy",
-                                         "amount": delta, "usd": round(delta * price, 2), "held": not prev})
-                events += 1
-            for w, old in ((prev or {}).get("bal") or {}).items():
-                new = snap.get(w, 0.0)
-                if old > 0 and new < old * 0.2 and (old - new) * price >= MIN_EVENT_USD:
-                    t = by_addr.get(w)
-                    if t:
-                        s["trader_buys"].append({"ts": now, "sig": f"hold-{k}-{w}-{int(now)}-s", "wallet": w,
-                                                 "handle": t["handle"], "rank": t["rank"], "key": k,
-                                                 "side": "sell", "amount": old - new,
-                                                 "usd": round((old - new) * price, 2)})
-                        events += 1
-            hold[k] = {"ts": now, "bal": snap}
+            dec = _decimals(s, chain, m["address"])
+            events += apply_snapshot(s, m["key"], m["price"], {w: v / 10 ** dec for w, v in raw.items()}, by_addr)
     dedupe(s)
     log.info("EVM holdings check: %d changes", events)
     return events

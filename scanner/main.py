@@ -140,41 +140,77 @@ def run():
         report.send(*report.build_exit(exits))
         log.info("Exit alerts: %s", [(p["symbol"], m) for p, m, _ in exits])
 
-    # 4. investable filter + quick score
+    # 4. investable filter + quick score (trades in the last 6h + what top traders hold right now)
+    by_sol = {t["wallet"]: t for t in traders if t.get("wallet")}
+    by_evm = {t["evm"]: t for t in traders if t.get("evm")}
+
+    def events_for(k, m):
+        by = by_sol if m["chain"] == "solana" else by_evm
+        ev = [e for e in s["trader_buys"] if e["key"] == k]
+        traded = {e["handle"] for e in ev if e["side"] == "buy"}
+        return ev + [h for h in evm.holding_events(s, k, m["price"], by) if h["handle"] not in traded]
+
     quick = {}
     for k in cands:
         m = markets.get(k)
         if not scoring.eligible(m) or m["symbol"].upper() in chains.QUOTE_SYMBOLS:
             continue
-        sm = scoring.smart_money(s["trader_buys"], k)
+        sm = scoring.smart_money(events_for(k, m), k)
         quick[k] = (m, sm, scoring.score(m, sm, trending_rank=trending.get(k)))
-    order = sorted(quick, key=lambda k: -quick[k][2]["score"])[:config.FINALISTS]
-    log.info("%d candidates, %d investable, deep-checking %d", len(cands), len(quick), len(order))
 
-    # 5. deep check (slow-changing data cached per coin; new smart-money buys force a fresh chart)
+    # 5. full check of EVERY investable coin. Slow-changing data (chart, safety, holders, X) is
+    # cached per coin; each scan fetches fresh data for up to FINALISTS coins - new top-trader
+    # buys first, then the best quick scores, then whichever coin was refreshed longest ago -
+    # so every investable coin gets a full, fresh check every few scans.
+    def last_fetch(k):
+        return max((e[0] for e in (s["deep_cache"].get(k) or {}).values()), default=0)
+
+    order = sorted(quick, key=lambda k: (k not in new_buy_keys, -quick[k][2]["score"]))
+    must = order[:max(1, config.FINALISTS // 3)]
+    rest = sorted(order[len(must):], key=last_fetch)
+    fetch_set = set(must + rest[:config.FINALISTS - len(must)])
+    log.info("%d candidates, %d investable, refreshing %d this scan", len(cands), len(quick), len(fetch_set))
+
+    def peek(k, name):
+        e = (s["deep_cache"].get(k) or {}).get(name)
+        return e[1] if e else None
+
     deep, x_used = [], 0
     for i, k in enumerate(order):
-        m, sm, _ = quick[k]
+        m, _, _ = quick[k]
+        fetch = k in fetch_set
+        if not fetch and peek(k, "safety") is None:
+            continue  # never fully checked yet - its turn comes in a later scan
         fresh_signal = k in new_buy_keys
-        sf, _ = cached(s, k, "safety", config.SAFETY_TTL_MIN, lambda: safety.check(m["chain"], m["address"]))
+        if fetch:
+            sf, _ = cached(s, k, "safety", config.SAFETY_TTL_MIN, lambda: safety.check(m["chain"], m["address"]))
+        else:
+            sf = peek(k, "safety")
         ch, info, growth = None, {}, None
         x = th = tg = None
         if sf["ok"]:  # don't spend rate limits / credits on coins that already failed safety
-            ch, _ = cached(s, k, "chart", config.CHART_TTL_MIN,
-                           lambda: chart.analyze(chart.candles(m["chain"], m["pair"])) if m["pair"] else None,
-                           force=fresh_signal)
-            info, got = cached(s, k, "info", config.INFO_TTL_MIN, lambda: chart.token_info(m["chain"], m["address"]))
-            info = info or {}
-            growth = holder_growth(s, k, info.get("holders"), got)
-            if x_used < config.X_TOKENS_PER_RUN:
-                x, got = cached(s, k, "x", config.X_TTL_MIN,
-                                lambda: xsocial.search(s, m["address"], m["symbol"], handles))
-                x_used += 1 if got else 0
-            else:  # over this run's X quota: reuse the last result if there is one
-                x = ((s["deep_cache"].get(k) or {}).get("x") or [0, None])[1]
+            if fetch:
+                if m["chain"] == "solana" and config.HELIUS_API_KEY:
+                    solana.holdings_snapshot(s, m, by_sol)
+                ch, _ = cached(s, k, "chart", config.CHART_TTL_MIN,
+                               lambda: chart.analyze(chart.candles(m["chain"], m["pair"])) if m["pair"] else None,
+                               force=fresh_signal)
+                info, got = cached(s, k, "info", config.INFO_TTL_MIN, lambda: chart.token_info(m["chain"], m["address"]))
+                info = info or {}
+                growth = holder_growth(s, k, info.get("holders"), got)
+                if x_used < config.X_TOKENS_PER_RUN:
+                    x, got = cached(s, k, "x", config.X_TTL_MIN,
+                                    lambda: xsocial.search(s, m["address"], m["symbol"], handles))
+                    x_used += 1 if got else 0
+                else:
+                    x = peek(k, "x")
+                tg, _ = cached(s, k, "tg", config.INFO_TTL_MIN,
+                               lambda: socials.telegram_members(m.get("telegram") or info.get("telegram")))
+            else:
+                ch, info, x, tg = peek(k, "chart"), peek(k, "info") or {}, peek(k, "x"), peek(k, "tg")
+                growth = holder_growth(s, k, info.get("holders"), False)
             th = fomo.thesis(s, k) if i < 3 else (s["thesis_cache"].get(k) or {}).get("items")
-            tg, _ = cached(s, k, "tg", config.INFO_TTL_MIN,
-                           lambda: socials.telegram_members(m.get("telegram") or info.get("telegram")))
+        sm = scoring.smart_money(events_for(k, m), k)
         r = scoring.score(m, sm, x=x, thesis=th, trending_rank=trending.get(k), chart=ch, safety=sf,
                           info=info, tg=tg, holder_growth=growth, deep=True)
         deep.append(r)
@@ -191,7 +227,7 @@ def run():
     for k in quick:
         by_chain[chains.split(k)[0]][1] += 1
     stats = {"traders": len(traders), "events": len(recent), "candidates": len(cands),
-             "eligible": len(quick), "deep": len(deep), "by_chain": by_chain}
+             "eligible": len(quick), "deep": len(deep), "fresh": len(fetch_set), "by_chain": by_chain}
     log.info("coins seen/investable by chain: %s", by_chain)
     os.makedirs("out", exist_ok=True)
     sent = {}

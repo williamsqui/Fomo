@@ -83,7 +83,7 @@ def track_table(summ, hits):
 
 def footer(s, stats):
     return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} leaderboard traders · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
-{stats['candidates']} coins seen ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully checked.<br>
+{stats['candidates']} coins seen ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
 Bankroll setting ${config.BANKROLL_USD:.0f} (update BANKROLL_USD as it changes). Budget: FOMO API {s['fomo_credits_used']:,}/{config.FOMO_MONTHLY_CREDITS:,} ·
 Helius {s['helius_credits_used']:,}/{config.HELIUS_MONTHLY_CREDITS:,} · X ${s['x_calls'] * 0.001:.2f}<br>
 This is a signal scanner, not financial advice. Meme coins can go to zero - only trade money you can afford to lose.</p>"""

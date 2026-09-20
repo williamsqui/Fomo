@@ -118,3 +118,39 @@ def dedupe(s):
             seen.add(k)
             uniq.append(e)
     s["trader_buys"] = uniq
+
+
+def top_holders(s, mint):
+    """{owner wallet: amount} for the 20 largest holders of a mint (2 Helius credits).
+
+    Returns (snapshot, floor) where floor is the smallest balance in the top 20, or None on failure.
+    """
+    res = _rpc(s, [("getTokenLargestAccounts", [mint])])
+    accts = ((res or [None])[0] or {}).get("value") or []
+    if not accts:
+        return None, 0.0
+    addrs = [a["address"] for a in accts]
+    amts = [float(a.get("uiAmount") or 0) for a in accts]
+    res = _rpc(s, [("getMultipleAccounts", [addrs, {"encoding": "jsonParsed"}])])
+    infos = ((res or [None])[0] or {}).get("value") or []
+    snap = {}
+    for info, amt in zip(infos, amts):
+        try:
+            owner = info["data"]["parsed"]["info"]["owner"]
+        except (KeyError, TypeError):
+            continue
+        snap[owner] = snap.get(owner, 0.0) + amt
+    return snap, (min(amts) if len(amts) >= 20 else 0.0)
+
+
+def holdings_snapshot(s, m, by_addr, max_age_min=30):
+    """Refresh which leaderboard wallets are among this coin's top holders (at most every 30 min)."""
+    from .evm import apply_snapshot
+    h = (s.get("holdings") or {}).get(m["key"])
+    if h and time.time() - h["ts"] < max_age_min * 60:
+        return 0
+    snap, floor = top_holders(s, m["address"])
+    if snap is None:
+        return 0
+    mine = {w: a for w, a in snap.items() if w in by_addr}
+    return apply_snapshot(s, m["key"], m["price"], mine, by_addr, sell_floor=floor)

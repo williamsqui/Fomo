@@ -64,7 +64,7 @@ EXIT_ALERTS = (os.getenv("EXIT_ALERTS") or "1") not in ("0", "false", "no")
 # ---- Picks ---------------------------------------------------------------
 MAX_PICKS = _int("MAX_PICKS", 3)
 MIN_SEND_SCORE = _int("MIN_SEND_SCORE", 62)   # below this = not worth your money
-FINALISTS = _int("FINALISTS", 8)              # coins that get the deep check each run
+FINALISTS = _int("FINALISTS", 12)             # coins whose chart/safety/holders are refreshed each scan
 
 # ---- Leaderboard -------------------------------------------------------------
 LEADERBOARD_WINDOW = os.getenv("LEADERBOARD_WINDOW", "7d")
