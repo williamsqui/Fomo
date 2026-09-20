@@ -1,0 +1,66 @@
+name: Check my position
+
+on:
+  workflow_dispatch:
+    inputs:
+      address:
+        description: "Coin address (copy from FOMO / DexScreener)"
+        required: true
+      gain:
+        description: "Your gain/loss % shown in FOMO (e.g. 37.7 or -6.4)"
+        required: true
+      value:
+        description: "Position value in $ shown in FOMO (optional, e.g. 24.42)"
+        required: false
+        default: ""
+      chain:
+        description: "Chain (auto works for most coins)"
+        type: choice
+        options: [auto, solana, base, bsc, robinhood]
+        default: auto
+
+concurrency:
+  group: check-position
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: scanner-state-
+
+      - name: Check position
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          GETXAPI_KEY: ${{ secrets.GETXAPI_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+          BANKROLL_USD: ${{ vars.BANKROLL_USD }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          LOG_LEVEL: WARNING
+          COIN: ${{ inputs.address }}
+          GAIN: ${{ inputs.gain }}
+          VALUE: ${{ inputs.value }}
+          CHAIN: ${{ inputs.chain }}
+        run: python -m scanner.position "$COIN" "$GAIN" "$VALUE" "$CHAIN"
