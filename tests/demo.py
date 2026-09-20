@@ -96,6 +96,12 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
     if "helius" in url:
         out = []
         for call in json:
+            if call["method"] == "getTokenAccountsByOwner":
+                w, mint = call["params"][0], call["params"][1]["mint"]
+                has = f"solana:{mint}" in buys.get(w, [])
+                out.append({"id": call["id"], "result": {"value": [{"account": {"data": {"parsed": {"info": {
+                    "tokenAmount": {"uiAmount": 1e5}}}}}}] if has else []}})
+                continue
             if call["method"] == "getSignaturesForAddress":
                 w = call["params"][0]
                 if call["params"][1].get("until"):

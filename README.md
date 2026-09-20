@@ -90,6 +90,16 @@ Then open the **Variables** tab and add `BANKROLL_USD` = `100`. The email times 
 ### 4. Start it
 Go to **Actions** → enable workflows → **FOMO scanner** → **Run workflow** to check it runs without errors (the Actions tab shows a green tick). After that it scans every 10 minutes. You'll hear from it as soon as an 80+ coin appears, and otherwise at the next 8:00 or 18:00.
 
+## Check any coin yourself
+Repo → **Actions** → **Check a coin** → **Run workflow** → paste the coin's address → **Run workflow**. About 2 minutes later you get a "Coin check" email with:
+
+- the same 0–100 score your scanner uses
+- a clear verdict: would the scanner send it, and if not, why not
+- which top-100 FOMO traders hold it right now, and how much
+- the chart read, safety checks, and X / Telegram buzz
+
+Leave the chain on **auto**, which works for Solana and for 0x addresses on Base, BNB and Robinhood.
+
 ## Emails you'll get
 - **"HIGH CONFIDENCE NOW: …" (any time):** a coin just scored 80+, top traders bought it in the last 2 hours, and the live price was re-checked seconds before sending. The same coin won't be alerted again for 12 hours.
 - **"FOMO digest …" at 8:00 and 18:00 (Vietnam time):** the 1–3 best coins scoring 62+ that still qualify at that moment. If none do, you get a short "no picks" note listing the closest calls, so you know it's running.

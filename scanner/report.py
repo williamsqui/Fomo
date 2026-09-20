@@ -102,14 +102,55 @@ def build(picks, summ, hits, s, stats, alerts, instant=False):
     return subject, body
 
 
+WEAK_LABEL = {"smart": "no top-100 traders buying or holding", "chart": "weak or unclear chart",
+              "momentum": "little buying momentum right now", "setup": "weak setup (liquidity / safety / holders)",
+              "social": "little X or Telegram buzz", "community": "not trending on FOMO"}
+
+
+def _short(txt, n=110):
+    return txt if len(txt) <= n else txt[:n - 1].rstrip() + "…"
+
+
+def near_call(r):
+    """One close call: score, gap to the bar, what's good, what's holding it back, address to check."""
+    from .scoring import MAX
+    m = r["market"]
+    good = [_short(x) for x in r["reasons"][:2]] or ["nothing stands out yet"]
+    bad = [w for w in r["why_not"] if not w.startswith("score ")]
+    bad += r["flags"][:2]
+    pts = r.get("points") or {}
+    weak = sorted((k for k in MAX if k in pts and pts[k] / MAX[k] < 0.25 and not (k == "social" and not r.get("x_checked"))),
+                  key=lambda k: pts[k] / MAX[k])
+    bad += [WEAK_LABEL[k] for k in weak]
+    bad = list(dict.fromkeys(_short(b) for b in bad))[:3]
+    if not bad and pts:
+        k = min((k for k in MAX if k in pts), key=lambda k: pts[k] / MAX[k])
+        bad = [f"weakest area: {WEAK_LABEL[k].split(' (')[0]} ({pts[k]:g}/{MAX[k]} points)"]
+    gap = config.MIN_SEND_SCORE - r["score"]
+    gap_txt = f"{gap} point{'s' if gap != 1 else ''} short" if gap > 0 else "blocked by a safety rule"
+    goods = "".join(f"<div style='color:#0a7d38'>+ {e(g)}</div>" for g in good)
+    bads = "".join(f"<div style='color:#b00020'>− {e(b)}</div>" for b in bad)
+    return f"""
+<div style="border:1px solid #ddd;border-radius:8px;padding:10px;margin:0 0 10px;font-size:13px">
+  <div style="font-size:15px;font-weight:700">${e(m['symbol'])} <span style="font-size:12px;color:#555;font-weight:400">{chains.LABEL[m['chain']]}</span>
+    <span style="float:right">{r['score']}/100</span></div>
+  <div style="color:#555;font-size:12px;margin-bottom:4px">{gap_txt} · MC {_money(m['mcap'])} · 1h {m['change'].get('h1', 0):+.0f}% · 24h {m['change'].get('h24', 0):+.0f}%</div>
+  {goods}{bads}
+  <div style="margin-top:4px"><a href="{e(m['url'])}">Chart</a> ·
+    <span style="font-family:monospace;font-size:11px;color:#666;word-break:break-all">{e(m['address'])}</span></div>
+</div>"""
+
+
 def build_status(summ, hits, s, stats, near, dropped=()):
     now = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%b %d %H:%M")
-    near_html = "".join(f"<li>${e(r['market']['symbol'])} ({chains.LABEL[r['market']['chain']]}) {r['score']}/100 - "
-                        f"{e('; '.join(r['why_not'])[:140])}</li>" for r in near[:5]) or "<li>none</li>"
+    near = [r for r in near if not r.get("hard")]  # failed safety = never a buy, don't list it
+    near_html = "".join(near_call(r) for r in near[:5]) or "<p>none</p>"
+    skipped = "".join(f"<p style='font-size:13px'>Skipped ${e(p['market']['symbol'])}: {e(why)}</p>" for p, why in dropped)
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
-<h2>No picks right now - scanner is running</h2>
-<p style="font-size:14px">Nothing currently meets the bar. Sitting out is a valid trade. Closest calls:</p>
-<ul style="font-size:13px">{near_html}</ul>{"".join(f"<p style='font-size:13px'>Skipped ${e(p['market']['symbol'])}: {e(why)}</p>" for p, why in dropped)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
+<h2 style="margin:4px 0">No picks right now - scanner is running</h2>
+<p style="font-size:14px">Nothing currently meets the {config.MIN_SEND_SCORE}/100 bar. Sitting out is a valid trade.
+Closest calls below - copy an address into <b>Check a coin</b> for the full breakdown.</p>
+{near_html}{skipped}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
     return f"FOMO digest {now}: no qualifying picks", body
 
 

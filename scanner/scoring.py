@@ -42,8 +42,9 @@ def smart_money(events, key):
         "buyer_ranks": {h: v[0]["rank"] for h, v in active.items()},
         "sellers": sorted(net_sellers),
         "buy_usd": round(sum(usd(v) for v in active.values())),
-        "first_buy": min((x["ts"] for v in active.values() for x in v), default=None),
-        "last_buy": max((x["ts"] for v in active.values() for x in v), default=None),
+        # "held when first seen" snapshots have no real buy time, so they don't set these
+        "first_buy": min((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
+        "last_buy": max((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
         "weight": sum(1 + (101 - v[0]["rank"]) / 100 for v in active.values()),
     }
 
