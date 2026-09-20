@@ -68,16 +68,16 @@ def filter_notes(m):
     return notes
 
 
-def run(address, chain="auto"):
-    s = st.load()
-    m = find_market(address, chain)
-    if not m:
-        subject = f"Coin check: {address[:10]}... not found"
-        body = (f"<p>Couldn't find <code>{address}</code> on DexScreener "
-                f"({'any EVM chain' if address.startswith('0x') else 'Solana'}). Check the address and chain.</p>")
-        report.send(subject, body)
-        print(subject)
-        return
+def not_found(address, what="Coin check"):
+    subject = f"{what}: {address[:10]}... not found"
+    body = (f"<p>Couldn't find <code>{address}</code> on DexScreener "
+            f"({'any EVM chain' if address.startswith('0x') else 'Solana'}). Check the address and chain.</p>")
+    report.send(subject, body)
+    print(subject)
+
+
+def analyze(s, m):
+    """Full scanner-style analysis of one coin. Returns (result, holders)."""
     k = m["key"]
     log.info("checking %s (%s) on %s", m["symbol"], m["address"], m["chain"])
 
@@ -129,7 +129,15 @@ def run(address, chain="auto"):
         r["size_note"] = (f"Not recommended by your scanner's rules. If you trade it anyway, treat it as a gamble: "
                           f"${floor} max (the smallest size where fees stay under {config.MAX_COST_PCT:.0f}%) "
                           f"and a stop-loss around -{config.STOP_LOSS_PCT:.0f}%.")
+    return r, holders
 
+
+def run(address, chain="auto"):
+    s = st.load()
+    m = find_market(address, chain)
+    if not m:
+        return not_found(address)
+    r, holders = analyze(s, m)
     subject, body = report.build_check(r, holders, s)
     report.send(subject, body)
     os.makedirs("out", exist_ok=True)
