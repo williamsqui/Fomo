@@ -124,6 +124,34 @@ def build_exit(alerts):
     return f"EXIT ALERT: {names}", body
 
 
+def build_check(r, holders, s):
+    m = r["market"]
+    summ, _ = tracker.summary(s)
+    now = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%b %d %H:%M")
+    if r["qualified"]:
+        verdict = (f"<div style='background:#eef7f0;border-radius:8px;padding:10px;font-size:14px'>"
+                   f"<b>Scanner verdict: would send this</b> - passes every filter and scores {r['score']}/100.</div>")
+    else:
+        items = "".join(f"<li>{e(w)}</li>" for w in r["why_not"])
+        verdict = (f"<div style='background:#fdeeee;border-radius:8px;padding:10px;font-size:14px'>"
+                   f"<b>Scanner verdict: would NOT send this</b><ul style='margin:6px 0 0 18px;padding:0'>{items}</ul></div>")
+    if holders:
+        rows = "".join(f"<tr><td>#{h['rank']}</td><td>{e(h['handle'])}</td><td>{_money(h['usd'])}</td></tr>" for h in holders[:15])
+        total = sum(h["usd"] for h in holders)
+        hold = (f"<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: {len(holders)} (≈{_money(total)})</h3>"
+                f"<table style='border-collapse:collapse;font-size:13px;width:100%' border='1' cellpadding='4'>"
+                f"<tr style='background:#f3f3f3'><th>Rank</th><th>Trader</th><th>Position now</th></tr>{rows}</table>")
+    else:
+        hold = "<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: none</h3>"
+    body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
+<h2 style="margin:4px 0">Coin check: ${e(m['symbol'])} - {r['score']}/100</h2>
+<p style="color:#555;font-size:13px;margin:0 0 10px">{chains.LABEL[m['chain']]} · checked {now} · same rules as your scanner</p>
+{verdict}{hold}<div style="height:12px"></div>{card(0, r, summ, False)}
+<p style="font-size:11px;color:#888">Holdings are read live from the chain. Positions under $20 are ignored. Not financial advice.</p>
+</body></html>"""
+    return f"Coin check: ${m['symbol']} {r['score']}/100 ({'would send' if r['qualified'] else 'would not send'})", body
+
+
 def send(subject, body):
     if not (config.SMTP_USER and config.SMTP_PASSWORD and config.EMAIL_TO):
         log.warning("SMTP not configured; skipping email")

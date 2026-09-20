@@ -72,7 +72,8 @@ def score(m, sm, *, x=None, thesis=None, trending_rank=None, chart=None, safety=
         who = ", ".join(f"{h} (#{sm['buyer_ranks'][h]})" for h in sm["buyers"][:4])
         mins = int((time.time() - sm["first_buy"]) / 60) if sm["first_buy"] else 0
         reasons.append(f"{len(sm['buyers'])} top-100 FOMO trader(s) bought or hold it: {who}"
-                       + (f" (~${sm['buy_usd']:,}, first {mins} min ago)" if sm["buy_usd"] else ""))
+                       + (f" (~${sm['buy_usd']:,}" + (f", first buy {mins} min ago)" if sm["first_buy"] else ")")
+                          if sm["buy_usd"] else ""))
     if sm["sellers"]:
         flags.append(f"leaderboard trader(s) sold: {', '.join(sm['sellers'][:3])}")
 
