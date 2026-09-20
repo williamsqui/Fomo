@@ -60,7 +60,7 @@ Scanning every 10 minutes stays on the free plans because slow-changing data is 
 
 Free plans never bill you automatically. If a limit is near, the scanner slows down instead.
 
-**Why a public repo?** Scans every 10 minutes need far more than the 2,000 free minutes a private repo gets. Public repos are unlimited. Your keys stay private because they're stored as encrypted Secrets. The run logs are set to hide picks, and the picks only go to your email. The workflow also includes a keepalive step, because GitHub otherwise pauses schedules in repos with no activity for 60 days.
+**Why a public repo?** Scans every 10 minutes need far more than the 2,000 free minutes a private repo gets. Public repos are unlimited. Your keys stay private because they're stored as encrypted Secrets. The run logs are set to hide picks, and the picks only go to your email. Note: GitHub pauses schedules in repos with no changes for 60 days and emails you first. If that happens, open the Actions tab and click **Enable workflow**, or edit any file (e.g. README) about every 50 days to prevent it.
 
 ## Setup (about 20 minutes, on a computer)
 

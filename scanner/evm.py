@@ -1,8 +1,16 @@
 """Watch leaderboard traders' EVM wallet (Base, BNB, Robinhood Chain) via free public RPCs.
 
-One eth_getLogs query per block chunk finds every ERC-20 Transfer into or out of
-any of the 100 wallets. Incoming transfers only count as buys when the trader
-sent the transaction themselves, which filters out scam airdrops.
+Two methods, so every chain is covered even on free RPCs:
+
+1. Transfer logs (eth_getLogs): finds every ERC-20 buy/sell by the 100 wallets.
+   Many free RPCs refuse this ("archive requests require a token"). When that
+   happens the chain is switched to method 2 only, and retried once a day.
+2. Holdings snapshots (eth_call balanceOf, batched with Multicall3): for each
+   candidate coin, read how much of it every leaderboard wallet holds right now.
+   Only needs the latest block, which every free RPC serves. Comparing with the
+   previous scan (10 min earlier) shows who bought or sold.
+Incoming log transfers only count as buys when the trader sent the transaction
+themselves, which filters out scam airdrops.
 """
 import logging
 import time
@@ -49,6 +57,9 @@ def scan_chain(s, chain, traders):
     by_addr = {t["evm"]: t for t in traders if t.get("evm")}
     if not by_addr:
         return 0
+    off = s.setdefault("evm_logs_off", {}).get(chain)
+    if off and time.time() - off < 86400:
+        return 0  # this RPC refuses log history; holdings snapshots cover the chain
     latest = int(rpc(chain, "eth_blockNumber", []), 16)
     older = rpc(chain, "eth_getBlockByNumber", [hex(latest - 1000), False])
     newer = rpc(chain, "eth_getBlockByNumber", [hex(latest), False])
@@ -70,6 +81,12 @@ def scan_chain(s, chain, traders):
             logs_out += rpc(chain, "eth_getLogs", [{"fromBlock": hex(frm), "toBlock": hex(to),
                                                     "topics": [TRANSFER, wtopics]}]) or []
         except RPCError as e:
+            msg = str(e).lower()
+            if any(w in msg for w in ("archive", "personal token", "-32602", "range", "limit")):
+                s["evm_logs_off"][chain] = time.time()
+                s["evm_cursor"].pop(chain, None)
+                log.info("%s RPC refuses log history; using holdings snapshots (retry in 24h)", chain)
+                return 0
             log.warning("%s; stopping at block %d", e, scanned_to)
             break
         scanned_to = to
@@ -119,6 +136,130 @@ def scan_wallets(s, traders):
             log.info("%s wallet scan: %d trader transfers", chain, n)
             total += n
         except RPCError as e:
-            log.warning("%s scan skipped: %s", chain, e)
+            log.info("%s log scan skipped: %s", chain, e)
     dedupe(s)
     return total
+
+
+# ---------------------------------------------------------------- holdings snapshots
+MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11"  # same address on Base, BNB and most EVM chains
+MIN_EVENT_USD = 20.0   # ignore dust changes
+
+
+def _word(n):
+    return format(n, "064x")
+
+
+def encode_aggregate3(token, wallets):
+    """aggregate3((address target, bool allowFailure, bytes callData)[]) with balanceOf(wallet) calls."""
+    n = len(wallets)
+    call = lambda w: "70a08231" + "0" * 24 + w[2:].lower()  # 36 bytes -> padded to 64
+    tuple_hex = lambda w: ("0" * 24 + token[2:].lower() + _word(1) + _word(0x60) + _word(36)
+                           + call(w) + "0" * 56)
+    body = _word(0x20) + _word(n)
+    body += "".join(_word(32 * n + 192 * i) for i in range(n))
+    body += "".join(tuple_hex(w) for w in wallets)
+    return "0x82ad56cb" + body
+
+
+def decode_aggregate3(hexdata):
+    """Return list of (success, int value or None)."""
+    b = bytes.fromhex(hexdata[2:] if hexdata.startswith("0x") else hexdata)
+    word = lambda pos: int.from_bytes(b[pos:pos + 32], "big")
+    arr = word(0)
+    n = word(arr)
+    base = arr + 32
+    out = []
+    for i in range(n):
+        t = base + word(base + 32 * i)
+        ok = word(t) == 1
+        data_at = t + word(t + 32)
+        ln = word(data_at)
+        data = b[data_at + 32: data_at + 32 + ln]
+        out.append((ok, int.from_bytes(data[:32], "big") if ok and ln >= 32 else None))
+    return out
+
+
+def balances(chain, token, wallets):
+    """{wallet: raw balance} for all wallets, one RPC call via Multicall3 (fallback: batched eth_call)."""
+    out = {}
+    for i in range(0, len(wallets), 100):
+        chunk = wallets[i:i + 100]
+        try:
+            res = rpc(chain, "eth_call", [{"to": MULTICALL3, "data": encode_aggregate3(token, chunk)}, "latest"])
+            for w, (ok, v) in zip(chunk, decode_aggregate3(res)):
+                if ok and v:
+                    out[w] = v
+            continue
+        except (RPCError, ValueError, IndexError):
+            pass
+        body = [{"jsonrpc": "2.0", "id": j, "method": "eth_call",
+                 "params": [{"to": token, "data": "0x70a08231" + "0" * 24 + w[2:]}, "latest"]}
+                for j, w in enumerate(chunk)]
+        for k in range(0, len(body), 25):
+            r = request("POST", config.EVM_RPC[chain], json=body[k:k + 25], timeout=30)
+            if r is None:
+                continue
+            for item in r.json() if isinstance(r.json(), list) else []:
+                try:
+                    v = int(item.get("result") or "0x0", 16)
+                except ValueError:
+                    continue
+                if v:
+                    out[chunk[item["id"]]] = v
+    return out
+
+
+def holdings_scan(s, traders, markets, max_per_chain=8):
+    """Snapshot leaderboard holdings of EVM candidate coins; diffs become buy/sell events."""
+    by_addr = {t["evm"]: t for t in traders if t.get("evm")}
+    wallets = list(by_addr)
+    if not wallets:
+        return 0
+    hold = s.setdefault("holdings", {})
+    now, events = time.time(), 0
+    per_chain = {}
+    for k, m in markets.items():
+        if m["chain"] != "solana" and m["chain"] in config.EVM_RPC and m["chain"] in config.CHAINS:
+            per_chain.setdefault(m["chain"], []).append(m)
+    for chain, ms in per_chain.items():
+        ms.sort(key=lambda m: -m["volume"].get("h1", 0))
+        for m in ms[:max_per_chain]:
+            k, token, price = m["key"], m["address"], m["price"]
+            try:
+                raw = balances(chain, token, wallets)
+            except RPCError as e:
+                log.info("%s holdings check failed: %s", chain, e)
+                break
+            dec = _decimals(s, chain, token)
+            snap = {w: v / 10 ** dec for w, v in raw.items()}
+            prev = hold.get(k)
+            seen = {e["wallet"] for e in s["trader_buys"] if e["key"] == k and e["side"] == "buy"}
+            for w, amt in snap.items():
+                if not prev and w in seen:  # already counted from transfer logs
+                    continue
+                old = (prev or {}).get("bal", {}).get(w, 0.0)
+                delta = amt - old
+                if delta * price < MIN_EVENT_USD:
+                    continue
+                t = by_addr[w]
+                # first time we see this coin: count current holders, but not as a "fresh" buy
+                ts = now if prev else now - config.LOOKBACK_HOURS * 3600 / 2
+                s["trader_buys"].append({"ts": ts, "sig": f"hold-{k}-{w}-{int(now)}", "wallet": w,
+                                         "handle": t["handle"], "rank": t["rank"], "key": k, "side": "buy",
+                                         "amount": delta, "usd": round(delta * price, 2), "held": not prev})
+                events += 1
+            for w, old in ((prev or {}).get("bal") or {}).items():
+                new = snap.get(w, 0.0)
+                if old > 0 and new < old * 0.2 and (old - new) * price >= MIN_EVENT_USD:
+                    t = by_addr.get(w)
+                    if t:
+                        s["trader_buys"].append({"ts": now, "sig": f"hold-{k}-{w}-{int(now)}-s", "wallet": w,
+                                                 "handle": t["handle"], "rank": t["rank"], "key": k,
+                                                 "side": "sell", "amount": old - new,
+                                                 "usd": round((old - new) * price, 2)})
+                        events += 1
+            hold[k] = {"ts": now, "bal": snap}
+    dedupe(s)
+    log.info("EVM holdings check: %d changes", events)
+    return events

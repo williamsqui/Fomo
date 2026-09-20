@@ -66,7 +66,8 @@ def trending(s):
         if toks:
             out = []
             for t in toks:
-                chain = chains.FOMO_NET.get(str(t.get("network", "solana")).lower())
+                net = t.get("network") or t.get("chain") or t.get("chainId") or (t.get("token") or {}).get("network") or "solana"
+                chain = chains.FOMO_NET.get(str(net).lower().strip())
                 addr = (t.get("token") or {}).get("address")
                 if chain in config.CHAINS and addr:
                     out.append({"key": chains.key(chain, addr), "rank": t.get("rank"),

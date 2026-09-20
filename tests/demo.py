@@ -69,6 +69,16 @@ def candles(shape, price):
     return rows
 
 
+LOGS_BLOCKED = {"base", "bsc"}
+
+
+def multicall_result(vals):
+    w = lambda n: format(n, "064x")
+    n = len(vals)
+    head = w(0x20) + w(n) + "".join(w(32 * n + 128 * i) for i in range(n))
+    return "0x" + head + "".join(w(1) + w(0x40) + w(32) + w(v) for v in vals)
+
+
 def evm_topic(a):
     return "0x" + "0" * 24 + a[2:]
 
@@ -107,6 +117,18 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
     if "publicnode" in url or "robinhood.com" in url:
         chain = "base" if "base" in url else "bsc" if "bsc" in url else "robinhood"
         m, p = json["method"], json["params"]
+        if m == "eth_getLogs" and chain in LOGS_BLOCKED:   # like the real free Base/BNB RPCs
+            return Resp({"error": {"code": -32602, "message": "Archive requests require a personal token"}})
+        if m == "eth_call" and p[0]["to"].lower() == evm.MULTICALL3.lower():
+            data = p[0]["data"][10:]
+            n = int(data[64:128], 16)
+            tuples = data[128 + 64 * n:]
+            vals = []
+            for i in range(n):
+                t = tuples[i * 384:(i + 1) * 384]
+                token, wallet = "0x" + t[24:64], "0x" + t[288:328]
+                vals.append(10 ** 24 if f"{chain}:{token}" in buys.get(wallet, []) else 0)
+            return Resp({"result": multicall_result(vals)})
         if m == "eth_blockNumber":
             return Resp({"result": hex(LATEST_BLOCK)})
         if m == "eth_getBlockByNumber":
@@ -158,6 +180,9 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
         return Resp(pairs)
     if "geckoterminal" in url:
         net = url.split("/networks/")[1].split("/")[0]
+        if url.endswith("/trending_pools"):
+            return Resp({"data": [{"relationships": {"base_token": {"data": {"id": f"{net}_{k.split(':')[1]}"}}}}
+                                  for k in COINS if k.startswith(net + ":")]})
         if "/ohlcv/" in url:
             tail = url.split("/pools/POOL")[1].split("/")[0]
             c = next(v for k, v in COINS.items() if k.startswith(net) and k.endswith(tail))

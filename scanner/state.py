@@ -59,6 +59,7 @@ def save(s):
     day = time.time() - 86400
     s["deep_cache"] = {k: {n: e for n, e in v.items() if e[0] >= day} for k, v in s["deep_cache"].items()}
     s["deep_cache"] = {k: v for k, v in s["deep_cache"].items() if v}
+    s["holdings"] = {k: v for k, v in s.get("holdings", {}).items() if v["ts"] >= cutoff}
     week = time.time() - 7 * 86400
     s["holders_hist"] = {k: [x for x in v if x[0] >= week][-60:] for k, v in s["holders_hist"].items()
                          if v and v[-1][0] >= week}

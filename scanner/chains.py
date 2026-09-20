@@ -11,8 +11,10 @@ CHAIN = {
 LABEL = {"solana": "Solana", "base": "Base", "bsc": "BNB", "robinhood": "Robinhood"}
 
 # FOMO API "network" strings -> internal id
-FOMO_NET = {"sol": "solana", "solana": "solana", "base": "base", "bnb": "bsc", "bsc": "bsc",
-            "robinhood": "robinhood", "rh": "robinhood"}
+FOMO_NET = {"sol": "solana", "solana": "solana", "base": "base", "8453": "base",
+            "bnb": "bsc", "bsc": "bsc", "binance": "bsc", "bnb chain": "bsc", "56": "bsc",
+            "robinhood": "robinhood", "rh": "robinhood", "hood": "robinhood", "robinhood chain": "robinhood",
+            "4663": "robinhood"}
 
 # Never treat these as meme coins (quote assets, stables, wrapped natives)
 QUOTE_SYMBOLS = {"SOL", "WSOL", "ETH", "WETH", "BNB", "WBNB", "USDC", "USDT", "USDG", "DAI",

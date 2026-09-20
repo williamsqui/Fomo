@@ -35,6 +35,23 @@ def candles(chain, pool):
     return rows or None
 
 
+def trending_tokens(s, chain, ttl_min=20):
+    """GeckoTerminal trending pools for one chain -> list of token keys (cached)."""
+    cache = s.setdefault("gt_trending", {}).get(chain)
+    if cache and time.time() - cache["ts"] < ttl_min * 60:
+        return cache["keys"]
+    d = _gt(f"/networks/{chains.CHAIN[chain]['gt']}/trending_pools", {"page": 1})
+    keys = []
+    for pool in (d or {}).get("data") or []:
+        tid = (((pool.get("relationships") or {}).get("base_token") or {}).get("data") or {}).get("id", "")
+        addr = tid.split("_", 1)[1] if "_" in tid else ""
+        if addr and addr.lower() not in chains.QUOTE_ADDRESSES and addr not in chains.QUOTE_ADDRESSES:
+            keys.append(chains.key(chain, addr))
+    if d is not None:
+        s["gt_trending"][chain] = {"ts": time.time(), "keys": keys[:20]}
+    return keys[:20]
+
+
 def token_info(chain, addr):
     d = _gt(f"/networks/{chains.CHAIN[chain]['gt']}/tokens/{addr}/info")
     try:

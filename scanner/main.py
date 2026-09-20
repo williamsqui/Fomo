@@ -121,13 +121,19 @@ def run():
 
     # 3. candidates
     trending = {t["key"]: t["rank"] for t in fomo.trending(s) if "key" in t}
-    cands = list(dict.fromkeys([e["key"] for e in recent if e["side"] == "buy"] + list(trending)))
+    gt_trend = [k for c in config.CHAINS for k in chart.trending_tokens(s, c)]
+    cands = list(dict.fromkeys([e["key"] for e in recent if e["side"] == "buy"] + list(trending) + gt_trend))
     cands = [k for k in cands if chains.split(k)[1] not in chains.QUOTE_ADDRESSES]
     watch = [p["key"] for p in s["picks"] if p.get("sent") and now - p["sent_ts"] < config.TRACK_WINDOW_HOURS * 3600]
     markets = dex.tokens(cands + tracker.open_keys(s) + watch)
     for e in s["trader_buys"]:  # EVM transfers only have token amounts - price them
         if e.get("usd") is None and e["key"] in markets:
             e["usd"] = round(e["amount"] * markets[e["key"]]["price"], 2)
+    # 3b. Base/BNB/Robinhood: check what the top traders hold right now (works on free RPCs)
+    investable = {k: m for k, m in markets.items() if k in cands and scoring.eligible(m)}
+    evm.holdings_scan(s, traders, investable)
+    recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
+    new_buy_keys = {e["key"] for e in recent if e["side"] == "buy" and e["ts"] >= now - 20 * 60}
     tracker.update(s, markets)
     exits = tracker.exit_checks(s, markets)
     if exits and config.EXIT_ALERTS:
@@ -179,8 +185,14 @@ def run():
     scan_prices = {r["key"]: r["market"]["price"] for r in qualified}
 
     summ, hits = tracker.summary(s)
+    by_chain = {}
+    for k in cands:
+        by_chain.setdefault(chains.split(k)[0], [0, 0])[0] += 1
+    for k in quick:
+        by_chain[chains.split(k)[0]][1] += 1
     stats = {"traders": len(traders), "events": len(recent), "candidates": len(cands),
-             "eligible": len(quick), "deep": len(deep)}
+             "eligible": len(quick), "deep": len(deep), "by_chain": by_chain}
+    log.info("coins seen/investable by chain: %s", by_chain)
     os.makedirs("out", exist_ok=True)
     sent = {}
 

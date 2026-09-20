@@ -48,7 +48,7 @@ EVM_MAX_CHUNKS = _int("EVM_MAX_CHUNKS", 30)       # safety cap per chain per run
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = _int("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").replace(" ", "")  # Gmail shows app passwords with spaces
 EMAIL_TO = os.getenv("EMAIL_TO") or SMTP_USER
 # Scans run every 10 min. Coins scoring INSTANT_SCORE+ are emailed right away;
 # other qualifying coins wait for the digest times (local 24h clock).
