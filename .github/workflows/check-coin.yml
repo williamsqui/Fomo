@@ -1,0 +1,60 @@
+name: Check a coin
+
+on:
+  workflow_dispatch:
+    inputs:
+      address:
+        description: "Coin address (copy from FOMO / DexScreener)"
+        required: true
+      chain:
+        description: "Chain (auto works for most coins)"
+        type: choice
+        options: [auto, solana, base, bsc, robinhood]
+        default: auto
+
+concurrency:
+  group: check-coin
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      # reuse the scanner's saved leaderboard and recent trader activity (read only)
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: scanner-state-
+
+      - name: Check coin
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          GETXAPI_KEY: ${{ secrets.GETXAPI_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          ROBINHOOD_RPC_URL: ${{ secrets.ROBINHOOD_RPC_URL }}
+          BANKROLL_USD: ${{ vars.BANKROLL_USD }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          MIN_SEND_SCORE: ${{ vars.MIN_SEND_SCORE }}
+          MIN_MCAP_USD: ${{ vars.MIN_MCAP_USD }}
+          LOG_LEVEL: WARNING
+          COIN: ${{ inputs.address }}
+          CHAIN: ${{ inputs.chain }}
+        run: python -m scanner.check "$COIN" "$CHAIN"
