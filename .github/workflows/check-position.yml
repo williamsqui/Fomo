@@ -7,7 +7,7 @@ on:
         description: "Coin address (copy from FOMO / DexScreener)"
         required: true
       gain:
-        description: "Your gain/loss % shown in FOMO (e.g. 37.7 or -6.4)"
+        description: "Your gain/loss % shown in FOMO (e.g. 37.7 or -6.4) - or type sold to stop watching it"
         required: true
       value:
         description: "Position value in $ shown in FOMO (optional, e.g. 24.42)"
@@ -38,12 +38,22 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
 
+      # reuse the scanner's saved leaderboard and recent top-trader activity (read only)
       - name: Restore state
         uses: actions/cache/restore@v4
         with:
           path: state
           key: scanner-state-${{ github.run_id }}
           restore-keys: scanner-state-
+
+      # the watchlist: this check adds the coin (or removes it if you typed "sold");
+      # the scanner picks the request up on its next run
+      - name: Restore watchlist requests
+        uses: actions/cache/restore@v4
+        with:
+          path: watchreq
+          key: watch-req-${{ github.run_id }}
+          restore-keys: watch-req-
 
       - name: Check position
         env:
@@ -64,3 +74,9 @@ jobs:
           VALUE: ${{ inputs.value }}
           CHAIN: ${{ inputs.chain }}
         run: python -m scanner.position "$COIN" "$GAIN" "$VALUE" "$CHAIN"
+
+      - name: Save watchlist request
+        uses: actions/cache/save@v4
+        with:
+          path: watchreq
+          key: watch-req-${{ github.run_id }}

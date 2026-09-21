@@ -33,6 +33,14 @@ jobs:
           key: scanner-state-${{ github.run_id }}
           restore-keys: scanner-state-
 
+      # coins you added (or marked sold) with "Check my position" - read only here
+      - name: Restore watchlist requests
+        uses: actions/cache/restore@v4
+        with:
+          path: watchreq
+          key: watch-req-${{ github.run_id }}
+          restore-keys: watch-req-
+
       - name: Run scanner
         env:
           FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
@@ -72,5 +80,3 @@ jobs:
         with:
           path: state
           key: scanner-state-${{ github.run_id }}
-
-
