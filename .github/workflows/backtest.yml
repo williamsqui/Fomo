@@ -1,0 +1,66 @@
+name: Backtest
+
+# Manual only. Takes 1-4 hours, then emails the result and attaches a CSV of every trade.
+# It reads the scanner's saved leaderboard but never writes to the scanner's state.
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back to test"
+        default: "90"
+      wallets:
+        description: "How many top traders to include (more = slower, more Helius credits)"
+        default: "50"
+
+concurrency:
+  group: backtest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Restore state (read only)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: scanner-state-${{ github.run_id }}
+          restore-keys: scanner-state-
+
+      - name: Run backtest
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          MIN_MCAP_USD: ${{ vars.MIN_MCAP_USD }}
+          MAX_MCAP_USD: ${{ vars.MAX_MCAP_USD }}
+          BT_DAYS: ${{ inputs.days }}
+          BT_WALLETS: ${{ inputs.wallets }}
+          BT_TIME_LIMIT_MIN: "300"
+          LOG_LEVEL: INFO
+        run: python -m scanner.backtest
+
+      - name: Attach every simulated trade (CSV)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-results
+          path: |
+            out/backtest.csv
+            out/backtest.html
+          if-no-files-found: ignore
+          retention-days: 14
