@@ -180,16 +180,24 @@ def decode_aggregate3(hexdata):
     return out
 
 
-def balances(chain, token, wallets):
-    """{wallet: raw balance} for all wallets, one RPC call via Multicall3 (fallback: batched eth_call)."""
-    out = {}
+def balances_checked(chain, token, wallets):
+    """({wallet: raw balance}, complete) via Multicall3 (fallback: batched eth_call).
+
+    `complete` is True only if every wallet was actually read. An empty dict with
+    complete=True means "nobody holds it"; complete=False means "we don't know",
+    and callers must not treat that as proof of a sell-off.
+    """
+    out, read = {}, 0
     for i in range(0, len(wallets), 100):
         chunk = wallets[i:i + 100]
         try:
             res = rpc(chain, "eth_call", [{"to": MULTICALL3, "data": encode_aggregate3(token, chunk)}, "latest"])
-            for w, (ok, v) in zip(chunk, decode_aggregate3(res)):
-                if ok and v:
-                    out[w] = v
+            got = decode_aggregate3(res)
+            for w, (ok, v) in zip(chunk, got):
+                if ok:
+                    read += 1
+                    if v:
+                        out[w] = v
             continue
         except (RPCError, ValueError, IndexError):
             pass
@@ -201,13 +209,21 @@ def balances(chain, token, wallets):
             if r is None:
                 continue
             for item in r.json() if isinstance(r.json(), list) else []:
+                if item.get("error"):
+                    continue
                 try:
                     v = int(item.get("result") or "0x0", 16)
                 except ValueError:
                     continue
+                read += 1
                 if v:
                     out[chunk[item["id"]]] = v
-    return out
+    return out, (bool(wallets) and read >= len(wallets))
+
+
+def balances(chain, token, wallets):
+    """{wallet: raw balance} for all wallets (see balances_checked for reliability info)."""
+    return balances_checked(chain, token, wallets)[0]
 
 
 def apply_snapshot(s, k, price, snap, by_addr, sell_floor=0.0):

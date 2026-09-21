@@ -13,7 +13,7 @@ It's built to judge coins the way you would with your own money. If nothing is g
    - liquidity **≥ $75k**, and at least 4% of market cap
    - trading for **at least 12 hours**
 4. **Deep check of the best 8:**
-   - **Safety:** RugCheck on Solana; GoPlus honeypot and tax checks on Base and BNB; verified-contract check on Robinhood Chain. Honeypots, high taxes, mint/freeze authority, hidden owners and whales holding over 45% are **rejected outright**.
+   - **Safety:** RugCheck on Solana; GoPlus honeypot and tax checks on Base and BNB; verified-contract check on Robinhood Chain. Honeypots, high taxes, mint/freeze authority, hidden owners, whales holding over 45%, and one wallet able to pull 50%+ of the liquidity are **rejected outright**. If one wallet can pull 25–50% of it, the score gets a rug-risk warning.
    - **Chart (7 days of hourly candles):** trend, higher lows day over day, pullback vs. the 7-day high, volume trend, buy vs. sell volume, rejection wicks, and overextension.
    - **Longer-term health:** how long it has survived, holder count and 24h holder growth, and how widely holders are spread.
    - **Social:** X posts (bots filtered out, big accounts and top traders weighted up), Telegram community size, website, FOMO community posts, and paid-promotion warnings.
@@ -99,6 +99,23 @@ Repo → **Actions** → **Check a coin** → **Run workflow** → paste the coi
 - the chart read, safety checks, and X / Telegram buzz
 
 Leave the chain on **auto**, which works for Solana and for 0x addresses on Base, BNB and Robinhood.
+
+## Hold or sell? Check a coin you own
+Repo → **Actions** → **Check my position** → **Run workflow**. Fill in:
+
+- the coin's address
+- your gain or loss % as shown in FOMO (e.g. `37.7` or `-6.4`)
+- optionally, your position value in $ from FOMO
+
+About 2 minutes later you get a verdict email: **HOLD**, **HOLD - TIGHTEN STOP**, **TAKE PROFIT** or **SELL**. It includes the reasons for and against holding, your estimated entry, the target and stop-loss prices, how much selling would cost in fees, and which top-100 traders still hold the coin. To ask follow-up questions, paste the email into your Claude chat.
+
+## Backtest (rough, Solana, ~90 days)
+Repo → **Actions** → **Backtest** → **Run workflow**. It takes 1–4 hours, then emails you a table showing what copying today's top traders would have made, with your +50% / −30% / 48h exits and FOMO fees included. Every simulated trade is attached as a CSV on the run page.
+
+Read the result as a **best case**. It uses today's top traders, who are on the board because they did well. It only covers Solana, and it leaves out X, Telegram, safety and liquidity, because there's no history for those. If a strategy loses money even here, it doesn't work. If it makes money here, the paper-trading table confirms it for real. It uses up to 60k Helius credits by default and always leaves 150k for the live scanner.
+
+## Paper trading (in every digest)
+Every coin that passes all the rules is "bought" on paper 20 minutes after the signal at the live price, then closed at +50%, −30% or after 48h, with fees and 1% slippage each way. The digest shows the profit or loss by score band over the last 14 days. That's the honest answer to "does this make money?", and it needs 2–4 weeks of trades to mean anything.
 
 ## Emails you'll get
 - **"HIGH CONFIDENCE NOW: …" (any time):** a coin just scored 80+, top traders bought it in the last 2 hours, and the live price was re-checked seconds before sending. The same coin won't be alerted again for 12 hours.

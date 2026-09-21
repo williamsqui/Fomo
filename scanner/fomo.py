@@ -9,7 +9,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import chains, config, state as st
+from . import chains, config, state as st, traders as reputation
 from .http import request
 
 log = logging.getLogger("fomo")
@@ -54,7 +54,9 @@ def leaderboard(s):
                  "wallet": (t.get("wallets") or {}).get("solana"),
                  "evm": ((t.get("wallets") or {}).get("evm") or "").lower() or None}
                 for i, t in enumerate(traders[:config.LEADERBOARD_SIZE])]}
-            log.info("Leaderboard refreshed: %d traders", len(traders))
+            reputation.observe(s, s["leaderboard"]["traders"])
+            log.info("Leaderboard refreshed: %d traders (%d days of history)",
+                     len(traders), reputation.history_days(s))
     return s["leaderboard"]["traders"]
 
 

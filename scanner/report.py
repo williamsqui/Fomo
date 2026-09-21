@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
-from . import chains, config, tracker
+from . import chains, config, tracker, traders as reputation
 from .sizing import fmt
 
 log = logging.getLogger("report")
@@ -73,17 +73,41 @@ def track_table(summ, hits):
     rows = "".join(
         f"<tr><td>{name}</td><td>{v['n']}</td><td>{v['hits']}</td>"
         f"<td>{'-' if v['rate'] is None else str(v['rate']) + '%'}</td></tr>"
-        for name, v in summ.items())
+        for name, v in summ.items() if name != "paper")
     hit_list = ", ".join(f"${e(p['symbol'])} +{(p['max'] / p['entry'] - 1) * 100:.0f}%" for p in hits) or "none yet"
     return f"""<h3 style="margin:18px 0 6px">Track record (14 days, +{config.TARGET_GAIN_PCT:.0f}% within {config.TRACK_WINDOW_HOURS}h)</h3>
 <table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
 <tr style="background:#f3f3f3"><th>Score band</th><th>Closed</th><th>Hit</th><th>Hit rate</th></tr>{rows}</table>
-<p style="font-size:13px">Recent hits: {hit_list}</p>"""
+<p style="font-size:13px">Recent hits: {hit_list}</p>{paper_table(summ.get("paper"))}"""
+
+
+def _usd(v):
+    return "-" if v is None else f"{'+' if v > 0 else '-' if v < 0 else ''}${abs(v):,.2f}"
+
+
+def paper_table(pp):
+    """Paper trading: what following every qualifying pick by the rules would have made."""
+    if not pp:
+        return ""
+    names = [n for n in pp if n not in ("open", "size")]
+    rows = "".join(
+        f"<tr><td>{'<b>All</b>' if n == 'all' else n}</td><td>{v['n']}</td><td>{v['wins']}</td><td>{v['stops']}</td>"
+        f"<td style='color:{'#0a7d38' if v['pnl'] > 0 else '#b00020' if v['pnl'] < 0 else '#111'}'>{_usd(v['pnl'])}</td>"
+        f"<td>{_usd(v['avg'])}</td></tr>" for n in names for v in [pp[n]])
+    note = ("No closed paper trades yet - each one takes up to 48h." if not pp["all"]["n"] else
+            f"{pp['all']['n']} closed, {pp['open']} still open.")
+    return f"""<h3 style="margin:18px 0 6px">Paper trading (14 days, ${pp['size']:.0f} per trade)</h3>
+<p style="font-size:12px;color:#555;margin:0 0 6px">Every coin that passed all the rules is "bought" 20 min after the signal at the live price,
+then closed at +{config.TARGET_GAIN_PCT:.0f}%, -{config.STOP_LOSS_PCT:.0f}% or after {config.TRACK_WINDOW_HOURS}h. FOMO fees and 1% slippage each way included.
+Prices are checked every 10 min, so real fills will differ a little. {note}</p>
+<table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
+<tr style="background:#f3f3f3"><th>Score</th><th>Trades</th><th>+50% hit</th><th>Stopped</th><th>Total P&amp;L</th><th>Avg / trade</th></tr>{rows}</table>"""
 
 
 def footer(s, stats):
     return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} leaderboard traders · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
 {stats['candidates']} coins seen ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
+{e(reputation.summary(s))}<br>
 Bankroll setting ${config.BANKROLL_USD:.0f} (update BANKROLL_USD as it changes). Budget: FOMO API {s['fomo_credits_used']:,}/{config.FOMO_MONTHLY_CREDITS:,} ·
 Helius {s['helius_credits_used']:,}/{config.HELIUS_MONTHLY_CREDITS:,} · X ${s['x_calls'] * 0.001:.2f}<br>
 This is a signal scanner, not financial advice. Meme coins can go to zero - only trade money you can afford to lose.</p>"""
@@ -182,8 +206,15 @@ def build_check(r, holders, s):
         hold = (f"<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: {len(holders)} (≈{_money(total)})</h3>"
                 f"<table style='border-collapse:collapse;font-size:13px;width:100%' border='1' cellpadding='4'>"
                 f"<tr style='background:#f3f3f3'><th>Rank</th><th>Trader</th><th>Position now</th></tr>{rows}</table>")
+    elif r.get("live_holders"):
+        hold = "<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: none (all 100 wallets checked just now)</h3>"
     else:
-        hold = "<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: none</h3>"
+        hold = ("<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: unknown</h3>"
+                "<p style='font-size:13px;color:#b36b00'>Their wallets could not be read this run, so the smart-money "
+                "part of this score is unverified. Treat the score as less certain.</p>")
+    if r.get("exited"):
+        hold += (f"<p style='font-size:13px;color:#b00020'>Sold out since buying: "
+                 f"{e(', '.join(r['exited'][:8]))} - these earlier buys are excluded from the score.</p>")
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
 <h2 style="margin:4px 0">Coin check: ${e(m['symbol'])} - {r['score']}/100</h2>
 <p style="color:#555;font-size:13px;margin:0 0 10px">{chains.LABEL[m['chain']]} · checked {now} · same rules as your scanner</p>

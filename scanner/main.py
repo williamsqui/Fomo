@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
-               solana, state as st, tracker, xsocial)
+               solana, state as st, tracker, traders as reputation, xsocial)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("main")
@@ -147,15 +147,16 @@ def run():
     def events_for(k, m):
         by = by_sol if m["chain"] == "solana" else by_evm
         ev = [e for e in s["trader_buys"] if e["key"] == k]
-        traded = {e["handle"] for e in ev if e["side"] == "buy"}
-        return ev + [h for h in evm.holding_events(s, k, m["price"], by) if h["handle"] not in traded]
+        # current holders always count (scoring never double-counts their $), however long
+        # ago they bought - otherwise a buy older than the 6h lookback vanishes from the score
+        return ev + evm.holding_events(s, k, m["price"], by)
 
     quick = {}
     for k in cands:
         m = markets.get(k)
         if not scoring.eligible(m) or m["symbol"].upper() in chains.QUOTE_SYMBOLS:
             continue
-        sm = scoring.smart_money(events_for(k, m), k)
+        sm = scoring.smart_money(events_for(k, m), k, reputation.fn(s))
         quick[k] = (m, sm, scoring.score(m, sm, trending_rank=trending.get(k)))
 
     # 5. full check of EVERY investable coin. Slow-changing data (chart, safety, holders, X) is
@@ -210,7 +211,7 @@ def run():
                 ch, info, x, tg = peek(k, "chart"), peek(k, "info") or {}, peek(k, "x"), peek(k, "tg")
                 growth = holder_growth(s, k, info.get("holders"), False)
             th = fomo.thesis(s, k) if i < 3 else (s["thesis_cache"].get(k) or {}).get("items")
-        sm = scoring.smart_money(events_for(k, m), k)
+        sm = scoring.smart_money(events_for(k, m), k, reputation.fn(s))
         r = scoring.score(m, sm, x=x, thesis=th, trending_rank=trending.get(k), chart=ch, safety=sf,
                           info=info, tg=tg, holder_growth=growth, deep=True)
         deep.append(r)

@@ -39,7 +39,7 @@ def _rugcheck(mint):
     if lp is not None and float(lp) >= 90:
         out["good"].append(f"LP {float(lp):.0f}% locked/burned")
     elif lp is not None and float(lp) < 50 and "pump" not in mint.lower():
-        out["flags"].append(f"only {float(lp):.0f}% of liquidity locked")
+        out["flags"].append(f"only {float(lp):.0f}% of liquidity locked (rug risk)")
     if not out["hard"]:
         out["good"].append("RugCheck: no danger-level risks")
     out["ok"] = not out["hard"]
@@ -48,6 +48,54 @@ def _rugcheck(mint):
 
 def _flag(d, k):
     return str(d.get(k, "0")) == "1"
+
+
+BURN = ("0x000000000000000000000000000000000000dead", "0x0000000000000000000000000000000000000000")
+
+
+def _pct(v):
+    """GoPlus gives LP shares as fractions ("0.4575"); tolerate percentages too."""
+    try:
+        p = float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return p / 100 if p > 1 else p
+
+
+def lp_risk(lp_holders):
+    """Can someone pull the liquidity out from under you? Returns (hard, flags, good).
+
+    The danger is liquidity that is NOT locked or burned and sits in an ordinary wallet:
+    that person can withdraw it in one transaction, the price gaps straight down, and
+    a stop-loss can't save you because there's no liquidity left to sell into.
+    Unlocked LP held by a contract (a locker, a multisig, a DEX position manager) is
+    less clear-cut, so it only counts towards the softer "spread out" warning.
+    """
+    if not lp_holders:
+        return [], ["liquidity lock not verified (no LP holder data for this pool)"], []
+    locked = eoa = other = 0.0
+    top_eoa = 0.0
+    for h in lp_holders:
+        p = _pct(h.get("percent"))
+        addr = (h.get("address") or "").lower()
+        tag = (h.get("tag") or "").lower()
+        if str(h.get("is_locked", "0")) == "1" or addr in BURN or "lock" in tag or "burn" in tag:
+            locked += p
+        elif str(h.get("is_contract", "0")) == "1":
+            other += p
+        else:
+            eoa += p
+            top_eoa = max(top_eoa, p)
+    hard, flags, good = [], [], []
+    if top_eoa * 100 >= config.LP_UNLOCKED_HARD_PCT:
+        hard.append(f"one wallet can pull {top_eoa * 100:.0f}% of the liquidity at any time (not locked)")
+    elif top_eoa * 100 >= config.LP_UNLOCKED_FLAG_PCT:
+        flags.append(f"one wallet can pull {top_eoa * 100:.0f}% of the liquidity (not locked - rug risk)")
+    elif (eoa + other) * 100 >= 50:
+        flags.append(f"{(eoa + other) * 100:.0f}% of the liquidity is unlocked, spread over several holders")
+    if locked >= 0.9:
+        good.append(f"LP {locked * 100:.0f}% locked/burned")
+    return hard, flags, good
 
 
 def _goplus(chain, addr):
@@ -87,10 +135,10 @@ def _goplus(chain, addr):
         out["top10"] = round(sum(float(h.get("percent", 0)) for h in holders[:10]) * 100, 1)
     except ValueError:
         pass
-    lp_locked = sum(float(h.get("percent", 0) or 0) for h in d.get("lp_holders") or []
-                    if str(h.get("is_locked", "0")) == "1" or (h.get("address") or "").startswith("0x000000000000000000000000000000000000dead"))
-    if lp_locked >= 0.9:
-        out["good"].append(f"LP {lp_locked * 100:.0f}% locked/burned")
+    hard, flags, good = lp_risk(d.get("lp_holders"))
+    out["hard"] += hard
+    out["flags"] += flags
+    out["good"] += good
     if not out["hard"]:
         out["good"].append("GoPlus: no honeypot, tax OK")
     out["ok"] = not out["hard"]
@@ -103,6 +151,7 @@ def _blockscout(addr, out):
     d = r.json() if r is not None else {}
     if d.get("is_verified"):
         out["flags"].append("only basic check available (verified contract, honeypot/tax not tested)")
+        out["flags"].append("liquidity lock not verified (no LP data on Robinhood Chain)")
     else:
         out["hard"].append("contract source not verified and no honeypot check available")
         out["ok"] = False

@@ -49,9 +49,25 @@ def decide(r, pnl, value=None):
     elif "downtrend" in verdict_txt:
         health -= 12
         minus.append("chart has turned into a downtrend")
+    live = r.get("live_holders")
+    exited = r.get("exited") or []
     if sm["buyers"]:
-        plus.append(f"{len(sm['buyers'])} top-100 trader(s) still holding or buying")
-        health += 4
+        if live:
+            plus.append(f"{len(sm['buyers'])} top-100 trader(s) still hold it right now (checked live)")
+            health += 4
+        else:
+            # couldn't read the wallets, so this is the scanner's log, not proof they still hold
+            plus.append(f"{len(sm['buyers'])} top-100 trader(s) bought it recently "
+                        "(live wallet check unavailable - not confirmed they still hold)")
+            health += 2
+    if live and exited:
+        health -= 8
+        minus.append(f"{len(exited)} top-100 trader(s) who bought it earlier hold none of it now - they sold out")
+    if live and not sm["buyers"] and not exited:
+        minus.append("no top-100 trader holds it - you're on your own in this one")
+    if sm.get("trimmed"):
+        # took some profit but still holds a real position - normal, not a reason to run
+        minus.append(f"trimmed a little but still holding: {', '.join(sm['trimmed'][:3])}")
     if sm["sellers"]:
         health -= 15
         minus.append(f"top-100 trader(s) selling: {', '.join(sm['sellers'][:3])}")
@@ -127,8 +143,14 @@ def build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels):
     if value:
         cost = max(config.FEE_MIN_USD, value * config.FEE_PCT / 100)
         fee = f"<p style='font-size:12px;color:#555'>Selling now costs about ${cost:.2f} in FOMO fees ({cost / value * 100:.1f}% of this position).</p>"
-    hold_txt = (", ".join(f"{h['handle']} (#{h['rank']}, ${h['usd']:,.0f})" for h in holders[:6])
-                if holders else "none of the top 100")
+    if holders:
+        hold_txt = ", ".join(f"{h['handle']} (#{h['rank']}, ${h['usd']:,.0f})" for h in holders[:6])
+    elif r.get("live_holders"):
+        hold_txt = "none of the top 100 (every one of their wallets was checked just now)"
+    else:
+        hold_txt = "unknown - their wallets could not be read this run, so treat the score as less certain"
+    if r.get("exited"):
+        hold_txt += f" · sold out since buying: {', '.join(r['exited'][:6])}"
     pl = "".join(f"<div style='color:#0a7d38'>+ {e(x)}</div>" for x in plus[:5]) or "<div>+ nothing stands out</div>"
     mi = "".join(f"<div style='color:#b00020'>− {e(x)}</div>" for x in minus[:5]) or "<div>− no major warning signs</div>"
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">

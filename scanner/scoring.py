@@ -19,33 +19,47 @@ import time
 from . import config
 
 MAX = {"smart": 30, "chart": 20, "momentum": 10, "setup": 15, "social": 20, "community": 5}
-SEVERE = ("chasing", "botted", "sold:", "downtrend", "from its 7-day high", "overextended", "distribution")
+SEVERE = ("chasing", "botted", "sold:", "downtrend", "from its 7-day high", "overextended", "distribution",
+          "rug risk")
 
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
-def smart_money(events, key):
+def smart_money(events, key, trust=None):
+    """trust: optional fn(handle) -> multiplier (see traders.py). Defaults to 1.0 each."""
+    trust = trust or (lambda h: 1.0)
     since = time.time() - config.LOOKBACK_HOURS * 3600
     ev = [e for e in events if e["key"] == key and e["ts"] >= since]
     buyers, sellers = {}, {}
     for e in ev:
         (buyers if e["side"] == "buy" else sellers).setdefault(e["handle"], []).append(e)
-    usd = lambda xs: sum(x.get("usd") or 0 for x in xs)
-    amt = lambda xs: sum(x.get("amount") or 0 for x in xs)
-    # sold >= 80% of what they bought in the window (or sold with no buy) = seller
-    net_sellers = {h for h in sellers if amt(sellers[h]) >= 0.8 * amt(buyers.get(h, []))}
+    # "held" events = a live wallet read (or fresh snapshot) shows they still hold it now.
+    holding = {e["handle"] for e in ev if e.get("held")}
+    real = lambda xs: [x for x in xs if not x.get("held")]
+    # $ in: their real buys if we saw them, otherwise what they hold now (never both)
+    usd = lambda xs: sum(x.get("usd") or 0 for x in (real(xs) or xs))
+    amt = lambda xs: sum(x.get("amount") or 0 for x in real(xs))
+    # seller = sold >= 80% of what they bought in the window (or sold with no buy seen)...
+    # ...unless a live read shows they still hold a real position: that's a trim, not an exit.
+    # (Before this, a whale trimming 10% of a $129k bag was scored as "selling".)
+    net_sellers = {h for h in sellers
+                   if h not in holding and amt(sellers[h]) >= 0.8 * amt(buyers.get(h, []))}
+    trimmed = sorted(h for h in sellers if h in holding)
     active = {h: v for h, v in buyers.items() if h not in net_sellers}
     return {
         "buyers": sorted(active, key=lambda h: active[h][0]["rank"]),
         "buyer_ranks": {h: v[0]["rank"] for h, v in active.items()},
         "sellers": sorted(net_sellers),
+        "trimmed": trimmed,
         "buy_usd": round(sum(usd(v) for v in active.values())),
         # "held when first seen" snapshots have no real buy time, so they don't set these
         "first_buy": min((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
         "last_buy": max((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
-        "weight": sum(1 + (101 - v[0]["rank"]) / 100 for v in active.values()),
+        # a proven regular's buy counts for more than a trader who appeared last week
+        "weight": sum((1 + (101 - v[0]["rank"]) / 100) * trust(h) for h, v in active.items()),
+        "trust": {h: round(trust(h), 2) for h in active},
     }
 
 
@@ -70,7 +84,13 @@ def score(m, sm, *, x=None, thesis=None, trending_rank=None, chart=None, safety=
     sp -= 7 * len(sm["sellers"])
     pts["smart"] = clamp(sp, -10, MAX["smart"])
     if sm["buyers"]:
-        who = ", ".join(f"{h} (#{sm['buyer_ranks'][h]})" for h in sm["buyers"][:4])
+        tr = sm.get("trust") or {}
+        mark = lambda h: (", proven" if tr.get(h, 1) >= config.TRUST_PROVEN
+                          else ", regular" if tr.get(h, 1) >= config.TRUST_REGULAR
+                          else ", new face" if tr.get(h, 1) < 1 else "")
+        who = ", ".join(f"{h} (#{sm['buyer_ranks'][h]}{mark(h)})" for h in sm["buyers"][:4])
+        if tr and all(v < 1 for v in tr.values()):
+            flags.append("the only buyers are new faces on the leaderboard (one good week, not a record)")
         mins = int((time.time() - sm["first_buy"]) / 60) if sm["first_buy"] else 0
         reasons.append(f"{len(sm['buyers'])} top-100 FOMO trader(s) bought or hold it: {who}"
                        + (f" (~${sm['buy_usd']:,}" + (f", first buy {mins} min ago)" if sm["first_buy"] else ")")

@@ -71,6 +71,16 @@ LEADERBOARD_WINDOW = os.getenv("LEADERBOARD_WINDOW", "7d")
 LEADERBOARD_SIZE = _int("LEADERBOARD_SIZE", 100)
 LOOKBACK_HOURS = _int("LOOKBACK_HOURS", 6)
 
+# ---- Trader reputation -------------------------------------------------------
+# The leaderboard is 7-day PnL, so some of it is luck. We keep our own record of who
+# keeps reappearing and weight their buys accordingly. Everyone is equal (1.0) until
+# there are TRUST_MIN_DAYS of history - no guessing from a handful of days.
+TRUST_WINDOW_DAYS = _int("TRUST_WINDOW_DAYS", 60)
+TRUST_MIN_DAYS = _int("TRUST_MIN_DAYS", 14)
+TRUST_PROVEN = _float("TRUST_PROVEN", 1.5)      # on the leaderboard 60%+ of days
+TRUST_REGULAR = _float("TRUST_REGULAR", 1.2)    # 30%+ of days
+TRUST_UNKNOWN = _float("TRUST_UNKNOWN", 0.7)    # new face, or seen once or twice
+
 # ---- Safety filters ("would I put my own money in this?") -------------------
 MIN_MCAP_USD = _float("MIN_MCAP_USD", 500_000)
 MAX_MCAP_USD = _float("MAX_MCAP_USD", 75_000_000)   # above this, +50% is much rarer
@@ -79,6 +89,10 @@ MIN_LIQ_TO_MCAP = _float("MIN_LIQ_TO_MCAP", 0.04)
 MIN_PAIR_AGE_HOURS = _float("MIN_PAIR_AGE_HOURS", 12)
 MAX_TOP10_HOLDERS_PCT = _float("MAX_TOP10_HOLDERS_PCT", 45)
 MAX_TAX_PCT = _float("MAX_TAX_PCT", 5)
+# Unlocked liquidity in one ordinary wallet = that person can pull it and the price gaps down
+# past any stop-loss. At/above HARD it's rejected; at/above FLAG it's a severe warning.
+LP_UNLOCKED_HARD_PCT = _float("LP_UNLOCKED_HARD_PCT", 50)
+LP_UNLOCKED_FLAG_PCT = _float("LP_UNLOCKED_FLAG_PCT", 25)
 
 # ---- Money ----------------------------------------------------------------
 BANKROLL_USD = _float("BANKROLL_USD", 100)
@@ -112,5 +126,10 @@ X_TTL_MIN = _int("X_TTL_MIN", 60)
 TARGET_GAIN_PCT = _float("TARGET_GAIN_PCT", 50)
 TRACK_SCORE_MIN = _int("TRACK_SCORE_MIN", 50)
 TRACK_WINDOW_HOURS = _int("TRACK_WINDOW_HOURS", 48)
+# Paper trading: every coin that passes all rules is "bought" on paper PAPER_LAG_MIN after
+# the signal (roughly when you'd actually get in) and closed by the +50% / -30% / 48h rules.
+PAPER_SIZE_USD = _float("PAPER_SIZE_USD", 30)
+PAPER_LAG_MIN = _int("PAPER_LAG_MIN", 20)
+PAPER_SLIPPAGE_PCT = _float("PAPER_SLIPPAGE_PCT", 1)
 
 STATE_DIR = os.getenv("STATE_DIR", "state")

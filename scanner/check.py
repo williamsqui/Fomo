@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
-               solana, state as st, xsocial)
+               solana, state as st, traders as reputation, xsocial)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("check")
@@ -31,25 +31,34 @@ def find_market(address, chain):
 
 
 def solana_holders(s, mint, traders):
-    """{wallet: token amount} for leaderboard wallets holding this mint (Helius, 1 batch)."""
+    """({wallet: token amount}, complete) for leaderboard wallets holding this mint.
+
+    `complete` is True only if every leaderboard wallet was read successfully, so an
+    empty result can be trusted to mean "none of them hold it" rather than "lookup failed".
+    """
     ws = [t["wallet"] for t in traders if t.get("wallet")]
     if not ws or not config.HELIUS_API_KEY:
-        return {}
-    out = {}
+        return {}, False
+    out, read = {}, 0
     for i in range(0, len(ws), 50):
         chunk = ws[i:i + 50]
         res = solana._rpc(s, [("getTokenAccountsByOwner", [w, {"mint": mint}, {"encoding": "jsonParsed"}])
-                              for w in chunk]) or []
+                              for w in chunk])
+        if res is None:
+            continue
         for w, r in zip(chunk, res):
+            if r is None:
+                continue
+            read += 1
             amt = 0.0
-            for acc in ((r or {}).get("value") or []):
+            for acc in (r.get("value") or []):
                 try:
                     amt += float(acc["account"]["data"]["parsed"]["info"]["tokenAmount"]["uiAmount"] or 0)
                 except (KeyError, TypeError, ValueError):
                     pass
             if amt > 0:
                 out[w] = amt
-    return out
+    return out, read >= len(ws)
 
 
 def filter_notes(m):
@@ -86,25 +95,34 @@ def analyze(s, m):
     by_wallet = {t["wallet"]: t for t in traders if t.get("wallet")}
     by_wallet.update({t["evm"]: t for t in traders if t.get("evm")})
     if m["chain"] == "solana":
-        held = solana_holders(s, m["address"], traders)
+        held, live_ok = solana_holders(s, m["address"], traders)
     else:
-        raw = evm.balances(m["chain"], m["address"], [t["evm"] for t in traders if t.get("evm")])
+        raw, live_ok = evm.balances_checked(m["chain"], m["address"],
+                                            [t["evm"] for t in traders if t.get("evm")])
         dec = evm._decimals(s, m["chain"], m["address"])
         held = {w: v / 10 ** dec for w, v in raw.items()}
     holders = sorted(({"handle": by_wallet[w]["handle"], "rank": by_wallet[w]["rank"],
                        "usd": amt * m["price"]} for w, amt in held.items() if w in by_wallet),
                      key=lambda h: h["rank"])
-    holders = [h for h in holders if h["usd"] >= 20]
+    holders = [h for h in holders if h["usd"] >= 20]    # dust left after selling doesn't count
+    still_in = {h["handle"] for h in holders}
 
-    # score: recent logged trades from the scanner + current holdings
+    # score: recent logged trades from the scanner + what the live wallet read shows now.
+    # The live read is the truth, in both directions:
+    #  - bought earlier but holds nothing now  -> sold out, the old buy must not count
+    #  - holds a real position now             -> counts, however long ago they bought
+    #    (the 6h lookback used to silently drop anyone who bought >6h ago and is still holding,
+    #     which turned "4 whales holding $430k" into "no smart money" and a false SELL)
     now = time.time()
     events = [e for e in s["trader_buys"] if e["key"] == k]
-    logged = {e["handle"] for e in events if e["side"] == "buy"}
+    exited = sorted({e["handle"] for e in events
+                     if e["side"] == "buy" and live_ok and e["handle"] not in still_in})
+    if live_ok:
+        events = [e for e in events if e["side"] != "buy" or e["handle"] in still_in]
     for h in holders:
-        if h["handle"] not in logged:
-            events.append({"ts": now, "handle": h["handle"], "rank": h["rank"],
-                           "key": k, "side": "buy", "amount": 1, "usd": round(h["usd"], 2), "held": True})
-    sm = scoring.smart_money(events, k)
+        events.append({"ts": now, "handle": h["handle"], "rank": h["rank"],
+                       "key": k, "side": "buy", "amount": 0, "usd": round(h["usd"], 2), "held": True})
+    sm = scoring.smart_money(events, k, reputation.fn(s))
     traded = [e["ts"] for e in events if e["side"] == "buy" and not e.get("held") and e["handle"] in sm["buyers"]]
     sm["first_buy"], sm["last_buy"] = (min(traded), max(traded)) if traded else (None, None)
 
@@ -122,6 +140,8 @@ def analyze(s, m):
         r["why_not"] = notes + r["why_not"]
         r["qualified"] = False
     r["checked_at"] = time.time()
+    r["live_holders"] = live_ok           # were all top-100 wallets actually read?
+    r["exited"] = exited                  # bought earlier, holds none now = sold out
     sizing.plan([r])
     if not r["qualified"]:
         floor = sizing.fee_floor(m["liquidity"])

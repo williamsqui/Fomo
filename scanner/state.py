@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-from . import config
+from . import config, traders
 
 DEFAULT = {
     "month": "",
@@ -26,6 +26,8 @@ DEFAULT = {
     "thesis_cache": {},       # mint -> {"ts":..., "items": [...]}
     "thesis_day": {"day": "", "count": 0},
     "picks": [],              # track record
+    "lb_days": [],            # days we have leaderboard history for
+    "trader_record": {},      # handle -> {"days": [...], "best": rank}
 }
 
 
@@ -55,6 +57,7 @@ def save(s):
     s["thesis_cache"] = {k: v for k, v in s["thesis_cache"].items() if v["ts"] >= cutoff}
     s["alerts"] = {k: v for k, v in s["alerts"].items() if v >= cutoff}
     s["digests_sent"] = s["digests_sent"][-10:]
+    traders.prune(s)
     s["instant_sent"] = {k: v for k, v in s["instant_sent"].items() if v >= cutoff}
     day = time.time() - 86400
     s["deep_cache"] = {k: {n: e for n, e in v.items() if e[0] >= day} for k, v in s["deep_cache"].items()}
