@@ -62,6 +62,23 @@ def _pct(v):
     return p / 100 if p > 1 else p
 
 
+def lp_shares(lp_holders):
+    """(locked, unlocked in ordinary wallets, unlocked in contracts, biggest single wallet) as fractions."""
+    locked = eoa = other = top_eoa = 0.0
+    for h in lp_holders or []:
+        p = _pct(h.get("percent"))
+        addr = (h.get("address") or "").lower()
+        tag = (h.get("tag") or "").lower()
+        if str(h.get("is_locked", "0")) == "1" or addr in BURN or "lock" in tag or "burn" in tag:
+            locked += p
+        elif str(h.get("is_contract", "0")) == "1":
+            other += p
+        else:
+            eoa += p
+            top_eoa = max(top_eoa, p)
+    return locked, eoa, other, top_eoa
+
+
 def lp_risk(lp_holders):
     """Can someone pull the liquidity out from under you? Returns (hard, flags, good).
 
@@ -73,19 +90,7 @@ def lp_risk(lp_holders):
     """
     if not lp_holders:
         return [], ["liquidity lock not verified (no LP holder data for this pool)"], []
-    locked = eoa = other = 0.0
-    top_eoa = 0.0
-    for h in lp_holders:
-        p = _pct(h.get("percent"))
-        addr = (h.get("address") or "").lower()
-        tag = (h.get("tag") or "").lower()
-        if str(h.get("is_locked", "0")) == "1" or addr in BURN or "lock" in tag or "burn" in tag:
-            locked += p
-        elif str(h.get("is_contract", "0")) == "1":
-            other += p
-        else:
-            eoa += p
-            top_eoa = max(top_eoa, p)
+    locked, eoa, other, top_eoa = lp_shares(lp_holders)
     hard, flags, good = [], [], []
     if top_eoa * 100 >= config.LP_UNLOCKED_HARD_PCT:
         hard.append(f"one wallet can pull {top_eoa * 100:.0f}% of the liquidity at any time (not locked)")
@@ -136,6 +141,7 @@ def _goplus(chain, addr):
     except ValueError:
         pass
     hard, flags, good = lp_risk(d.get("lp_holders"))
+    out["lp_top"] = round(lp_shares(d["lp_holders"])[3] * 100, 1) if d.get("lp_holders") else None
     out["hard"] += hard
     out["flags"] += flags
     out["good"] += good

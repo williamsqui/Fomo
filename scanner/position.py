@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import chains, check, config, report, state as st
+from . import chains, check, config, report, state as st, watchlist
 from .sizing import fmt
 
 log = logging.getLogger("position")
@@ -174,7 +174,28 @@ def build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels):
     return f"Position check: ${m['symbol']} - {verdict} ({pnl_txt})", body
 
 
-def run(address, pnl, value=None, chain="auto"):
+def stop_watching(address, chain="auto"):
+    """'sold' typed in the gain box: stop watching this coin."""
+    m = check.find_market(address, chain)
+    key = m["key"] if m else chains.key("solana" if not address.startswith("0x") else "base", address)
+    watchlist.request_remove(key)
+    sym = f"${m['symbol']}" if m else address[:10] + "..."
+    subject = f"Stopped watching {sym}"
+    report.send(subject, f"<p>Got it - you sold {e(sym)}. No more watchlist alerts for it "
+                         f"(takes effect on the next scan, within 10 minutes).</p>")
+    print(subject)
+    return "SOLD"
+
+
+WATCH_NOTE = ("<div style='background:#f3f6ff;border-radius:6px;padding:8px;font-size:12px;margin:8px 0'>"
+              "<b>Now on your watchlist for {days:.0f} days.</b> Every 10 minutes the scanner checks whether the top traders "
+              "holding it sell out, whether liquidity is being pulled, and your stop-loss and target - and emails you if any "
+              "of them happen. When you sell, run Check my position again and type <b>sold</b> in the gain box.</div>")
+
+
+def run(address, pnl, value=None, chain="auto", raw_gain=""):
+    if str(raw_gain).strip().lower().startswith("sold"):
+        return stop_watching(address, chain)
     s = st.load()
     m = check.find_market(address, chain)
     if not m:
@@ -182,6 +203,13 @@ def run(address, pnl, value=None, chain="auto"):
     r, holders = check.analyze(s, m)
     verdict, headline, plus, minus, levels = decide(r, pnl, value)
     subject, body = build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels)
+    try:
+        watchlist.request_add(r, holders, levels)
+        body = body.replace("<p style=\"font-size:12px;color:#555\">Want to dig deeper?",
+                            WATCH_NOTE.format(days=config.WATCH_DAYS)
+                            + "<p style=\"font-size:12px;color:#555\">Want to dig deeper?", 1)
+    except OSError as ex:           # never lose the verdict email over the watchlist
+        log.warning("couldn't add to watchlist: %s", ex)
     report.send(subject, body)
     os.makedirs("out", exist_ok=True)
     with open("out/position.html", "w") as f:
@@ -194,5 +222,5 @@ if __name__ == "__main__":
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
     a = sys.argv[1:] + ["", "", "", ""]
     if not a[0].strip():
-        sys.exit("usage: python -m scanner.position <address> <gain %> [position $] [chain]")
-    run(a[0].strip(), _num(a[1]), _num(a[2]), (a[3] or "auto").strip().lower())
+        sys.exit("usage: python -m scanner.position <address> <gain % | sold> [position $] [chain]")
+    run(a[0].strip(), _num(a[1]), _num(a[2]), (a[3] or "auto").strip().lower(), raw_gain=a[1])

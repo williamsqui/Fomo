@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
-from . import chains, config, tracker, traders as reputation
+from . import chains, config, tracker, traders as reputation, watchlist
 from .sizing import fmt
 
 log = logging.getLogger("report")
@@ -108,6 +108,7 @@ def footer(s, stats):
     return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} leaderboard traders · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
 {stats['candidates']} coins seen ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
 {e(reputation.summary(s))}<br>
+{(e(watchlist.summary(s)) + '<br>') if watchlist.summary(s) else ''}
 Bankroll setting ${config.BANKROLL_USD:.0f} (update BANKROLL_USD as it changes). Budget: FOMO API {s['fomo_credits_used']:,}/{config.FOMO_MONTHLY_CREDITS:,} ·
 Helius {s['helius_credits_used']:,}/{config.HELIUS_MONTHLY_CREDITS:,} · X ${s['x_calls'] * 0.001:.2f}<br>
 This is a signal scanner, not financial advice. Meme coins can go to zero - only trade money you can afford to lose.</p>"""
@@ -209,9 +210,13 @@ def build_check(r, holders, s):
     elif r.get("live_holders"):
         hold = "<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: none (all 100 wallets checked just now)</h3>"
     else:
+        why = {"budget": "Your Helius free credits are being paced for the rest of the month, so Solana wallet "
+                         "reads are paused until the budget catches up.",
+               "rate limit": "Helius rate-limited the request (too many at once). Running the check again usually works."
+               }.get(r.get("holders_why"), "Their wallets could not be read this run.")
         hold = ("<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: unknown</h3>"
-                "<p style='font-size:13px;color:#b36b00'>Their wallets could not be read this run, so the smart-money "
-                "part of this score is unverified. Treat the score as less certain.</p>")
+                f"<p style='font-size:13px;color:#b36b00'>{e(why)} The smart-money part of this score is unverified, "
+                "so treat the score as less certain.</p>")
     if r.get("exited"):
         hold += (f"<p style='font-size:13px;color:#b00020'>Sold out since buying: "
                  f"{e(', '.join(r['exited'][:8]))} - these earlier buys are excluded from the score.</p>")

@@ -109,6 +109,8 @@ LEADERBOARD_REFRESH_HOURS = _int("LEADERBOARD_REFRESH_HOURS", 6)
 TRENDING_REFRESH_HOURS = _int("TRENDING_REFRESH_HOURS", 2)
 THESIS_TOKENS_PER_DAY = _int("THESIS_TOKENS_PER_DAY", 2)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 1_000_000)
+HELIUS_RPS = _float("HELIUS_RPS", 8)           # free plan allows 10 requests/second (each batched call counts)
+HELIUS_BATCH = _int("HELIUS_BATCH", 10)        # max calls per batch request
 MAX_TX_PER_WALLET_PER_RUN = _int("MAX_TX_PER_WALLET_PER_RUN", 10)
 X_TOKENS_PER_RUN = _int("X_TOKENS_PER_RUN", 4)
 X_PAGES_PER_TOKEN = _int("X_PAGES_PER_TOKEN", 1)
@@ -133,3 +135,10 @@ PAPER_LAG_MIN = _int("PAPER_LAG_MIN", 20)
 PAPER_SLIPPAGE_PCT = _float("PAPER_SLIPPAGE_PCT", 1)
 
 STATE_DIR = os.getenv("STATE_DIR", "state")
+
+# ---- Watchlist ---------------------------------------------------------------
+# Coins you hold (every emailed pick + every "Check my position") are watched each scan.
+WATCH_DAYS = _float("WATCH_DAYS", 7)
+WATCH_LP_EVERY_MIN = _int("WATCH_LP_EVERY_MIN", 30)     # GoPlus liquidity check per coin
+LIQ_DROP_ALERT_PCT = _float("LIQ_DROP_ALERT_PCT", 30)   # pool shrank this much since watching began
+WATCH_REQ_DIR = os.getenv("WATCH_REQ_DIR", "watchreq")  # requests from the "Check my position" workflow

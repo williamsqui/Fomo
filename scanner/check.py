@@ -43,7 +43,7 @@ def solana_holders(s, mint, traders):
     for i in range(0, len(ws), 50):
         chunk = ws[i:i + 50]
         res = solana._rpc(s, [("getTokenAccountsByOwner", [w, {"mint": mint}, {"encoding": "jsonParsed"}])
-                              for w in chunk])
+                              for w in chunk], on_demand=True)
         if res is None:
             continue
         for w, r in zip(chunk, res):
@@ -101,8 +101,8 @@ def analyze(s, m):
                                             [t["evm"] for t in traders if t.get("evm")])
         dec = evm._decimals(s, m["chain"], m["address"])
         held = {w: v / 10 ** dec for w, v in raw.items()}
-    holders = sorted(({"handle": by_wallet[w]["handle"], "rank": by_wallet[w]["rank"],
-                       "usd": amt * m["price"]} for w, amt in held.items() if w in by_wallet),
+    holders = sorted(({"handle": by_wallet[w]["handle"], "rank": by_wallet[w]["rank"], "wallet": w,
+                       "amount": amt, "usd": amt * m["price"]} for w, amt in held.items() if w in by_wallet),
                      key=lambda h: h["rank"])
     holders = [h for h in holders if h["usd"] >= 20]    # dust left after selling doesn't count
     still_in = {h["handle"] for h in holders}
@@ -142,6 +142,8 @@ def analyze(s, m):
     r["checked_at"] = time.time()
     r["live_holders"] = live_ok           # were all top-100 wallets actually read?
     r["exited"] = exited                  # bought earlier, holds none now = sold out
+    r["holders_why"] = "" if live_ok else (solana.LAST_FAIL[0] if m["chain"] == "solana" else "rpc")
+    r["lp_top"] = (sf or {}).get("lp_top")   # biggest single unlocked-LP wallet, % (EVM only)
     sizing.plan([r])
     if not r["qualified"]:
         floor = sizing.fee_floor(m["liquidity"])

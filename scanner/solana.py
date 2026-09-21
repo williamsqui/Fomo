@@ -17,23 +17,51 @@ STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",   # USDC
 QUOTES = STABLES | {WSOL}
 
 
-def _rpc(s, calls):
-    """calls = [(method, params), ...] sent as one JSON-RPC batch."""
-    cost = len(calls)
-    if not st.within_budget(s["helius_credits_used"], config.HELIUS_MONTHLY_CREDITS, cost):
+LAST_FAIL = [""]          # why the most recent Helius call failed ("budget" / "rate limit")
+_next_ok = [0.0]
+
+
+def _rpc(s, calls, on_demand=False):
+    """calls = [(method, params), ...]. Returns results in order (None for any that failed).
+
+    Helius' free plan allows 10 requests/second and counts every call inside a batch, so a
+    50-call batch gets rejected outright (HTTP 429). Before this fix that silently turned
+    "check all 100 top-trader wallets" into "couldn't read any of them". Now calls go out in
+    batches of at most HELIUS_BATCH, spaced to stay under HELIUS_RPS.
+    Returns None only if nothing could be sent at all (monthly budget pacing reached).
+    """
+    # on-demand checks (a button you pressed) only need to fit the monthly total; the
+    # every-10-minutes scanner is also paced evenly across the month
+    fits = (s["helius_credits_used"] + len(calls) <= config.HELIUS_MONTHLY_CREDITS if on_demand else
+            st.within_budget(s["helius_credits_used"], config.HELIUS_MONTHLY_CREDITS, len(calls)))
+    if not fits:
+        LAST_FAIL[0] = "budget"
         return None
-    body = [{"jsonrpc": "2.0", "id": i, "method": m, "params": p}
-            for i, (m, p) in enumerate(calls)]
-    r = request("POST", f"https://mainnet.helius-rpc.com/?api-key={config.HELIUS_API_KEY}",
-                json=body, timeout=30)
-    if r is None:
-        return None
-    s["helius_credits_used"] += cost
-    out = r.json()
-    if isinstance(out, dict):
-        out = [out]
-    out.sort(key=lambda x: x.get("id", 0))
-    return [o.get("result") for o in out]
+    out = []
+    for i in range(0, len(calls), config.HELIUS_BATCH):
+        chunk = calls[i:i + config.HELIUS_BATCH]
+        body = [{"jsonrpc": "2.0", "id": j, "method": m, "params": p} for j, (m, p) in enumerate(chunk)]
+        res = None
+        for attempt in range(3):
+            wait = _next_ok[0] - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            _next_ok[0] = time.time() + len(chunk) / config.HELIUS_RPS
+            r = request("POST", f"https://mainnet.helius-rpc.com/?api-key={config.HELIUS_API_KEY}",
+                        json=body, timeout=30, retries=1)
+            if r is not None:
+                res = r.json()
+                break
+            LAST_FAIL[0] = "rate limit"
+            time.sleep(1.5 * (attempt + 1))
+        if res is None:
+            out += [None] * len(chunk)
+            continue
+        s["helius_credits_used"] += len(chunk)
+        res = [res] if isinstance(res, dict) else res
+        by_id = {x.get("id"): x.get("result") for x in res}
+        out += [by_id.get(j) for j in range(len(chunk))]
+    return out
 
 
 def parse_swap(tx, wallet):

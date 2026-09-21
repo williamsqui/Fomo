@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
-               solana, state as st, tracker, traders as reputation, xsocial)
+               solana, state as st, tracker, traders as reputation, watchlist, xsocial)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("main")
@@ -104,6 +104,7 @@ def run():
         sys.exit(1)
     now = time.time()
     s["run_count"] += 1
+    watchlist.merge_requests(s)   # coins added/removed via "Check my position"
 
     # 1. leaderboard + wallets (top 50 every run, the rest every 3rd run)
     traders = fomo.leaderboard(s)
@@ -125,7 +126,7 @@ def run():
     cands = list(dict.fromkeys([e["key"] for e in recent if e["side"] == "buy"] + list(trending) + gt_trend))
     cands = [k for k in cands if chains.split(k)[1] not in chains.QUOTE_ADDRESSES]
     watch = [p["key"] for p in s["picks"] if p.get("sent") and now - p["sent_ts"] < config.TRACK_WINDOW_HOURS * 3600]
-    markets = dex.tokens(cands + tracker.open_keys(s) + watch)
+    markets = dex.tokens(list(dict.fromkeys(cands + tracker.open_keys(s) + watch + watchlist.keys(s))))
     for e in s["trader_buys"]:  # EVM transfers only have token amounts - price them
         if e.get("usd") is None and e["key"] in markets:
             e["usd"] = round(e["amount"] * markets[e["key"]]["price"], 2)
@@ -139,6 +140,9 @@ def run():
     if exits and config.EXIT_ALERTS:
         report.send(*report.build_exit(exits))
         log.info("Exit alerts: %s", [(p["symbol"], m) for p, m, _ in exits])
+    watched = watchlist.check(s, markets)   # coins you hold: top traders leaving, liquidity, stop/target
+    if watched and config.EXIT_ALERTS:
+        report.send(*watchlist.build_email(watched))
 
     # 4. investable filter + quick score (trades in the last 6h + what top traders hold right now)
     by_sol = {t["wallet"]: t for t in traders if t.get("wallet")}
@@ -276,6 +280,8 @@ def run():
                  len(qualified), " / ".join(config.DIGEST_TIMES))
 
     tracker.log_picks(s, deep, sent)
+    for p in sent.values():              # every coin you're told to buy is watched from now on
+        watchlist.add_pick(s, p, traders)
     st.save(s)
 
 
