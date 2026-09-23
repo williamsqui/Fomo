@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
-               solana, state as st, tracker, traders as reputation, watchlist, xsocial)
+               solana, state as st, tracker, traders as reputation, watchlist, xsocial, learn, copy)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("main")
@@ -105,6 +105,10 @@ def run():
     now = time.time()
     s["run_count"] += 1
     watchlist.merge_requests(s)   # coins added/removed via "Check my position"
+    added = s.pop("_watch_added", [])
+    if added:                     # proof the request really arrived
+        report.send(*watchlist.build_added_email(added))
+    learn.update(s)               # what the paper trades have taught (refreshed every 6h)
 
     # 1. leaderboard + wallets (top 50 every run, the rest every 3rd run)
     traders = fomo.leaderboard(s)
@@ -140,6 +144,8 @@ def run():
     if exits and config.EXIT_ALERTS:
         report.send(*report.build_exit(exits))
         log.info("Exit alerts: %s", [(p["symbol"], m) for p, m, _ in exits])
+    if config.COPY_TRADER:
+        copy.scan(s)                        # shadow book: paper-trade whatever one trader buys
     watched = watchlist.check(s, markets)   # coins you hold: top traders leaving, liquidity, stop/target
     if watched and config.EXIT_ALERTS:
         report.send(*watchlist.build_email(watched))
@@ -218,6 +224,7 @@ def run():
         sm = scoring.smart_money(events_for(k, m), k, reputation.fn(s))
         r = scoring.score(m, sm, x=x, thesis=th, trending_rank=trending.get(k), chart=ch, safety=sf,
                           info=info, tg=tg, holder_growth=growth, deep=True)
+        learn.gate(s, r)          # stricter bar where paper trades keep losing
         deep.append(r)
         log.info("%3d %-6s %-9s %-8s %s", r["score"], r["tier"], m["chain"], m["symbol"],
                  "QUALIFIED" if r["qualified"] else "; ".join(r["why_not"])[:120])

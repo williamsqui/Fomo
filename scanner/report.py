@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
-from . import chains, config, tracker, traders as reputation, watchlist
+from . import chains, config, copy as copybook, tracker, traders as reputation, watchlist
 from .sizing import fmt
 
 log = logging.getLogger("report")
@@ -70,15 +70,82 @@ def card(i, r, summ, alerted_before):
 
 
 def track_table(summ, hits):
+    label = {"emailed": "Emailed to you"}
     rows = "".join(
-        f"<tr><td>{name}</td><td>{v['n']}</td><td>{v['hits']}</td>"
-        f"<td>{'-' if v['rate'] is None else str(v['rate']) + '%'}</td></tr>"
-        for name, v in summ.items() if name != "paper")
+        f"<tr><td>{label.get(name, name)}</td><td>{v['n']}</td><td>{v['hits']}</td>"
+        f"<td>{'-' if v['rate'] is None else str(v['rate']) + '%'}</td><td>{v.get('open', 0)}</td></tr>"
+        for name, v in summ.items() if name not in ("paper", "learn"))
     hit_list = ", ".join(f"${e(p['symbol'])} +{(p['max'] / p['entry'] - 1) * 100:.0f}%" for p in hits) or "none yet"
-    return f"""<h3 style="margin:18px 0 6px">Track record (14 days, +{config.TARGET_GAIN_PCT:.0f}% within {config.TRACK_WINDOW_HOURS}h)</h3>
+    return f"""<h3 style="margin:18px 0 6px">Scanner track record (14 days, +{config.TARGET_GAIN_PCT:.0f}% within {config.TRACK_WINDOW_HOURS}h)</h3>
+<p style="font-size:12px;color:#555;margin:0 0 6px">Every coin the scanner scored 50+, whether it was emailed or not - not your own trades.
+A coin only counts once its full {config.TRACK_WINDOW_HOURS}h has passed, so hits and misses are judged the same way. Highs must show on two scans in a row.</p>
 <table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
-<tr style="background:#f3f3f3"><th>Score band</th><th>Closed</th><th>Hit</th><th>Hit rate</th></tr>{rows}</table>
-<p style="font-size:13px">Recent hits: {hit_list}</p>{paper_table(summ.get("paper"))}"""
+<tr style="background:#f3f3f3"><th>Score band</th><th>Judged</th><th>Hit +{config.TARGET_GAIN_PCT:.0f}%</th><th>Hit rate</th><th>Still in 48h</th></tr>{rows}</table>
+<p style="font-size:13px">Recent hits: {hit_list}</p>{paper_table(summ.get("paper"))}{learn_box(summ.get("learn"))}"""
+
+
+def watch_table(s):
+    """Every coin being watched and when the scanner last looked - so you can see it working."""
+    rows = watchlist.status(s)
+    if not rows:
+        return ""
+    out = ""
+    for r in rows:
+        when = "not yet" if r["ago"] is None else f"{r['ago']} min ago"
+        if r["ok"] is False:
+            when += " (wallet read failed, retrying)"
+        still = "-" if r["still_in"] is None else f"{r['still_in']} of {r['tracked']}"
+        chg = "-" if r["chg"] is None else f"{r['chg']:+.0f}%"
+        out += (f"<tr><td>${e(r['symbol'])}</td><td>{r['source']}</td><td>{when}</td>"
+                f"<td>{still}</td><td>{chg}</td></tr>")
+    return (f"<h3 style='margin:18px 0 6px'>Coins being watched every 10 minutes</h3>"
+            f"<table style='border-collapse:collapse;font-size:13px;width:100%' border='1' cellpadding='4'>"
+            f"<tr style='background:#f3f3f3'><th>Coin</th><th>Added by</th><th>Last checked</th>"
+            f"<th>Top traders still in</th><th>Since entry</th></tr>{out}</table>")
+
+
+def copy_table(s):
+    """The shadow book: what copying one trader would have done, on paper."""
+    c = copybook.summary(s)
+    if not c:
+        return ""
+    days = max(0.1, (time.time() - c["since"]) / 86400)
+    row = lambda name, v: (f"<tr><td>{name}</td><td>{v['n']}</td>"
+                           f"<td>{'-' if not v['n'] else str(round(100 * v['wins'] / v['n'])) + '%'}</td>"
+                           f"<td>{_usd(v['avg'])}</td>"
+                           f"<td style='color:{'#0a7d38' if v['pnl'] > 0 else '#b00020' if v['pnl'] < 0 else '#111'}'>"
+                           f"<b>{_usd(v['pnl'])}</b></td></tr>")
+    recent = ", ".join(f"${e(t['symbol'])} {_usd(t['mirror']['pnl'])} ({e(t['mirror']['how'])})"
+                       for t in c["recent"]) or "none closed yet"
+    holding = ", ".join("$" + e(x) for x in c["holding"]) or "nothing"
+    return f"""<h3 style="margin:18px 0 6px">Copying @{e(c['handle'])} (paper only)</h3>
+<p style="font-size:12px;color:#555;margin:0 0 6px">Every coin they buy is paper-bought at ${c['size']:.0f} within 10 minutes of
+their wallet showing it, then closed two ways: when <b>they</b> sell (or after {config.COPY_MAX_DAYS:.0f} days), and by <b>your</b> rules
+(+{config.TARGET_GAIN_PCT:.0f}% / -{config.STOP_LOSS_PCT:.0f}% / {config.TRACK_WINDOW_HOURS}h). Fees and slippage included. Watching {c['chains']}.
+Running {days:.1f} days · {c['open']} open: {holding}</p>
+<table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
+<tr style="background:#f3f3f3"><th>Exit style</th><th>Closed</th><th>Winners</th><th>Avg / trade</th><th>Total</th></tr>
+{row("Their exits", c["their"])}{row("Your rules", c["yours"])}</table>
+<p style="font-size:12px;color:#555">Last closed: {recent}</p>"""
+
+
+def learn_box(L):
+    """What the paper trades have taught the scanner, in plain words."""
+    if not L:
+        return ""
+    if L["n"] < L["need"]:
+        body = (f"Still learning: {L['n']} of {L['need']} closed paper trades so far. Nothing is adjusted until then - "
+                "a handful of meme-coin trades is mostly luck.")
+    else:
+        rules = "".join(f"<li>{e(x)}</li>" for x in L["rules"]) or "<li>no changes needed - your settings are holding up</li>"
+        les = "".join(f"<li>{e(x)}</li>" for x in L["lessons"]) or "<li>no clear pattern yet</li>"
+        warn = ("<p style='color:#b00020;margin:4px 0'><b>Even the strictest bar is losing money on paper. "
+                "Consider pausing real trades until this turns positive.</b></p>" if L.get("losing") else "")
+        body = (f"{warn}<b>Adjustments now active</b> (based on {L['n']} closed paper trades, last 30 days; "
+                f"they only ever make the scanner stricter):<ul style='margin:4px 0 6px 18px;padding:0'>{rules}</ul>"
+                f"<b>Biggest differences so far</b><ul style='margin:4px 0 0 18px;padding:0'>{les}</ul>")
+    return (f"<h3 style='margin:18px 0 6px'>What paper trading has taught the scanner</h3>"
+            f"<div style='font-size:13px;background:#f6f6f6;border-radius:6px;padding:8px'>{body}</div>")
 
 
 def _usd(v):
@@ -117,13 +184,19 @@ This is a signal scanner, not financial advice. Meme coins can go to zero - only
 def build(picks, summ, hits, s, stats, alerts, instant=False):
     now = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%b %d %H:%M")
     cards = "".join(card(i, r, summ, r["key"] in alerts) for i, r in enumerate(picks))
+    held = [w["symbol"] for w in (s.get("watch") or {}).values() if w.get("source") == "manual"]
+    if held:
+        cards = (f"<div style='background:#fff6e5;border-left:5px solid #b36b00;border-radius:6px;padding:8px;"
+                 f"font-size:13px;margin:0 0 12px'><b>One-trade rule:</b> you're holding "
+                 f"{e(', '.join('$' + x for x in held))}. Skip this unless its position check says SELL or "
+                 f"TIGHTEN STOP - then sell it first and use the money here.</div>") + cards
     funded = sum(1 for r in picks if r.get("size"))
     names = ", ".join(f"${r['market']['symbol']} {r['score']}" for r in picks)
     subject = (f"HIGH CONFIDENCE NOW: {names}" if instant else f"FOMO digest {now}: {names}")
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
 <h2 style="margin:4px 0">{"High-confidence alert" if instant else "Digest"}: {funded} pick{'s' if funded != 1 else ''} to buy now{f" + {len(picks) - funded} alternate" if len(picks) > funded else ""}</h2>
 <p style="color:#555;font-size:13px;margin:0 0 12px">{f"Scored {config.INSTANT_SCORE}+ with top-trader buying in the last {config.INSTANT_SIGNAL_MAX_AGE_MIN} min. Price re-checked seconds before sending. Sizes assume your full bankroll is free - scale down if you already hold other picks." if instant else f"Ranked by confidence of reaching +{config.TARGET_GAIN_PCT:.0f}%. Every coin passed the safety checks, cleared {config.MIN_SEND_SCORE}/100, and had its price re-checked right before sending. Fewer than 3 means the rest weren't good enough."}</p>
-{cards}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
+{cards}{watch_table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
     return subject, body
 
 
@@ -175,7 +248,7 @@ def build_status(summ, hits, s, stats, near, dropped=()):
 <h2 style="margin:4px 0">No picks right now - scanner is running</h2>
 <p style="font-size:14px">Nothing currently meets the {config.MIN_SEND_SCORE}/100 bar. Sitting out is a valid trade.
 Closest calls below - copy an address into <b>Check a coin</b> for the full breakdown.</p>
-{near_html}{skipped}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
+{near_html}{skipped}{watch_table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
     return f"FOMO digest {now}: no qualifying picks", body
 
 

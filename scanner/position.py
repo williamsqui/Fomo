@@ -205,9 +205,14 @@ def run(address, pnl, value=None, chain="auto", raw_gain=""):
     subject, body = build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels)
     try:
         watchlist.request_add(r, holders, levels)
+        seen = watchlist.describe((s.get("watch") or {}).get(m["key"]))
+        note = WATCH_NOTE.format(days=config.WATCH_DAYS) + (
+            f"<p style='font-size:12px;margin:0 0 8px'><b>Watchlist status:</b> {html.escape(seen)}.</p>" if seen else
+            "<p style='font-size:12px;margin:0 0 8px'><b>Watchlist status:</b> just added - you'll get a "
+            "\"Now watching\" email within about 10 minutes confirming the scanner picked it up. "
+            "If that email never comes, tell Claude.</p>")
         body = body.replace("<p style=\"font-size:12px;color:#555\">Want to dig deeper?",
-                            WATCH_NOTE.format(days=config.WATCH_DAYS)
-                            + "<p style=\"font-size:12px;color:#555\">Want to dig deeper?", 1)
+                            note + "<p style=\"font-size:12px;color:#555\">Want to dig deeper?", 1)
     except OSError as ex:           # never lose the verdict email over the watchlist
         log.warning("couldn't add to watchlist: %s", ex)
     report.send(subject, body)

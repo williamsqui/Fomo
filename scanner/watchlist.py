@@ -75,7 +75,7 @@ def merge_requests(s):
     except (FileNotFoundError, json.JSONDecodeError):
         return 0
     seen = s.setdefault("watch_seen", [])
-    done = 0
+    done, added = 0, []
     for q in sorted(reqs, key=lambda q: q.get("ts", 0)):
         if q.get("id") in seen:
             continue
@@ -87,9 +87,12 @@ def merge_requests(s):
             new = q["entry"]
             if old:  # re-checked a coin already watched: fresh levels, keep what was already alerted
                 new["alerted"] = old.get("alerted", [])
+            else:
+                added.append(new)
             s["watch"][new["key"]] = new
         done += 1
     s["watch_seen"] = seen[-300:]
+    s["_watch_added"] = added          # for the "now watching" confirmation email
     return done
 
 
@@ -174,6 +177,7 @@ def check(s, markets):
 
         # 1. are the top traders who were in it still in?
         amts, ok = _balances(s, it)
+        it["checked"], it["read_ok"] = now, ok
         if ok:
             left = 0
             for wal, h in list(it["holders"].items()):
@@ -199,6 +203,7 @@ def check(s, markets):
                     if amt < h["base"] * HALF:
                         hit(f"half:{wal}", f"{h['handle']} (#{h['rank']}) sold about half their position",
                             "Taking profit, not necessarily leaving - worth a position check.")
+            it["still_in"], it["tracked"] = left, len(it["holders"])
             # (skip when the only exits were already reported by the normal exit alert)
             if it["holders"] and left == 0 and any(a.startswith("out:") for a in it["alerted"]):
                 hit("none_left", "none of the top traders who were in it are left",
@@ -263,3 +268,42 @@ def build_email(alerts):
 Coins drop off automatically after {config.WATCH_DAYS:.0f} days.</p>
 <p style="font-size:11px;color:#888">Rules-based guidance from live data, not financial advice.</p></body></html>"""
     return f"WATCHLIST ALERT: {names} - {first}"[:150], body
+
+
+def status(s):
+    """One line per watched coin: proof the scanner is really looking at it."""
+    now, rows = time.time(), []
+    for it in (s.get("watch") or {}).values():
+        ago = int((now - it["checked"]) / 60) if it.get("checked") else None
+        price = it.get("last_price")
+        rows.append({"symbol": it["symbol"], "source": "you" if it["source"] == "manual" else "scanner pick",
+                     "ago": ago, "ok": it.get("read_ok"), "still_in": it.get("still_in"),
+                     "tracked": it.get("tracked", len(it.get("holders") or {})),
+                     "chg": (price / it["entry"] - 1) * 100 if price and it.get("entry") else None,
+                     "days_left": max(0, (it["expires"] - now) / 86400)})
+    return rows
+
+
+def describe(it):
+    """Short text for a single coin, e.g. for the position-check email."""
+    if not it or not it.get("checked"):
+        return None
+    ago = int((time.time() - it["checked"]) / 60)
+    who = (f"{it.get('still_in', 0)} of {it.get('tracked', 0)} top traders you're following still in"
+           if it.get("read_ok") else "wallet read failed on the last scan - it will retry")
+    return f"last checked by the scanner {ago} min ago · {who}"
+
+
+def build_added_email(added):
+    """Confirmation that a coin from Check my position really reached the scanner."""
+    items = ""
+    for it in added:
+        names = ", ".join(f"{h['handle']} (#{h['rank']})" for h in it["holders"].values()) or "none (no top trader holds it)"
+        items += (f"<li style='margin:6px 0'><b>${e(it['symbol'])}</b> - following {len(it['holders'])} top trader(s): "
+                  f"{e(names)}. Stop-loss {fmt(it['stop'])}, target {fmt(it['target'])}.</li>")
+    body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
+<h2 style="margin:4px 0">Now watching every 10 minutes</h2><ul style="font-size:14px">{items}</ul>
+<p style="font-size:13px">You'll get a WATCHLIST ALERT if one of those traders sells out or sells half, if liquidity is pulled,
+or if the price hits your stop-loss or target. Each digest also lists every coin being watched and when it was last checked.</p>
+<p style="font-size:12px;color:#555">When you sell: Actions → Check my position → type <b>sold</b> in the gain box.</p></body></html>"""
+    return "Now watching: " + ", ".join("$" + it["symbol"] for it in added), body

@@ -30,18 +30,37 @@ def log_picks(s, scored, sent):
         if k in open_:
             if k in sent and not open_[k].get("sent"):  # upgraded to an emailed pick
                 open_[k].update(_sent_fields(sent[k], price))
-            if r.get("qualified") and not open_[k].get("paper"):  # only now passes every rule
-                open_[k]["paper"] = {"pending": True, "since": time.time()}
+            if r.get("paper_ok", r.get("qualified")) and not open_[k].get("paper"):  # now passes the rules
+                open_[k]["paper"] = {"pending": True, "since": time.time(), "feat": features(r)}
             continue
         p = {"ts": time.time(), "key": k, "symbol": r["market"]["symbol"],
              "chain": r["market"]["chain"], "score": r["score"], "band": band(r["score"]),
-             "sent": False, "entry": price, "max": price, "min": price, "hit": False, "closed": False}
-        if r.get("qualified"):
+             "sent": False, "entry": price, "max": price, "min": price, "hit": False, "closed": False,
+             "pair": r["market"].get("pair", ""), "prev": price}
+        if r.get("paper_ok", r.get("qualified")):
             # paper trade: "bought" PAPER_LAG_MIN later at the live price, closed by your rules
-            p["paper"] = {"pending": True}
+            p["paper"] = {"pending": True, "feat": features(r)}
         if k in sent:
             p.update(_sent_fields(sent[k], price))
         s["picks"].append(p)
+
+
+FLAG_TYPES = {  # warning text -> short category the learner can count
+    "mint": "owner can mint", "rug risk": "rug risk", "unlocked": "liquidity unlocked",
+    "chasing": "chasing a pump", "botted": "botted X chatter", "distribution": "distribution (red volume)",
+    "new faces": "only new-face traders", "overextended": "overextended chart",
+    "7-day high": "far below 7-day high", "sold:": "a top trader sold", "downtrend": "downtrend",
+}
+
+
+def features(r):
+    """What the scanner knew when it picked this coin - so paper results can be traced back."""
+    m, sm = r["market"], r.get("smart") or {}
+    flags = " ".join(r.get("flags") or []).lower()
+    return {"score": r["score"], "chain": m.get("chain"), "mcap": m.get("mcap"),
+            "pts": {k: round(v, 1) for k, v in (r.get("points") or {}).items()},
+            "buyers": list(sm.get("buyers") or [])[:8], "runup": r.get("runup"),
+            "flags": sorted({v for k, v in FLAG_TYPES.items() if k in flags})}
 
 
 def _sent_fields(r, price):
@@ -100,11 +119,15 @@ def _paper(p, price, now):
     if pp.get("pending"):
         if now - pp.get("since", p["ts"]) < config.PAPER_LAG_MIN * 60:
             return
-        pp.update(pending=False, entry=price, entry_ts=now, size=config.PAPER_SIZE_USD,
+        pp.update(pending=False, entry=price, entry_ts=now, size=config.PAPER_SIZE_USD, prev=price,
                   target=price * (1 + config.TARGET_GAIN_PCT / 100),
                   stop=price * (1 - config.STOP_LOSS_PCT / 100))
         return
-    how = ("stop" if price <= pp["stop"] else "target" if price >= pp["target"]
+    prev = pp.get("prev", price)
+    pp["prev"] = price
+    # a stop or target only counts when two scans in a row agree, so one bad price from the
+    # data feed can't "win" or "lose" a trade by itself
+    how = ("stop" if max(price, prev) <= pp["stop"] else "target" if min(price, prev) >= pp["target"]
            else "time" if now - pp["entry_ts"] > config.TRACK_WINDOW_HOURS * 3600 else None)
     if how:
         pp.update(done=True, how=how, exit=price, exit_ts=now,
@@ -132,29 +155,55 @@ def update(s, markets):
                               pnl=trade_pnl(pp["size"], pp["entry"], last))
         if p["closed"]:
             continue
-        if price:
-            p["max"] = max(p["max"], price)
-            p["min"] = min(p.get("min", p["entry"]), price)
+        if price and m.get("pair") and p.get("pair") and m["pair"] != p["pair"]:
+            p["pair"], p["prev"] = m["pair"], None      # price source changed pool: don't trust this jump
+        elif price:
+            # a new high only counts once two scans in a row see it (filters one-off bad prices,
+            # like the "+385,008%" JUPCAT reading)
+            prev = p.get("prev") or price
+            p["max"] = max(p["max"], min(price, prev))
+            p["min"] = min(p.get("min", p["entry"]), max(price, prev))
+            p["prev"] = price
         if p["max"] >= p["entry"] * target:
             p["hit"] = True
         if p["hit"] or time.time() - p["ts"] > config.TRACK_WINDOW_HOURS * 3600:
             p["closed"] = True
 
 
+SUSPECT_GAIN = 50      # a 50x "gain" inside 48h is almost always a bad price, not a trade
+
+
+def _suspect(p):
+    return p["max"] / p["entry"] > SUSPECT_GAIN if p.get("entry") else True
+
+
 def summary(s, days=14):
-    since = time.time() - days * 86400
-    done = [p for p in s["picks"] if p["ts"] >= since and p["closed"]]
+    """Hit rates per score band - fair version.
+
+    Only picks whose full 48h window has passed are counted. Before, a hit closed at once but
+    a miss only after 48h, so in the first two days almost every closed pick was a hit and the
+    table showed a meaningless 100%.
+    """
+    now = time.time()
+    since = now - days * 86400
+    window = config.TRACK_WINDOW_HOURS * 3600
+    recent = [p for p in s["picks"] if p["ts"] >= since and not _suspect(p)]
+    done = [p for p in recent if now - p["ts"] >= window]
+    waiting = [p for p in recent if now - p["ts"] < window]
     out = {}
     for _, _, name in BANDS:
         ps = [p for p in done if p.get("band") == name]
         hits = sum(p["hit"] for p in ps)
-        out[name] = {"n": len(ps), "hits": hits, "rate": round(100 * hits / len(ps)) if ps else None}
+        out[name] = {"n": len(ps), "hits": hits, "rate": round(100 * hits / len(ps)) if ps else None,
+                     "open": sum(1 for p in waiting if p.get("band") == name)}
     sent = [p for p in done if p.get("sent")]
     out["emailed"] = {"n": len(sent), "hits": sum(p["hit"] for p in sent),
-                      "rate": round(100 * sum(p["hit"] for p in sent) / len(sent)) if sent else None}
+                      "rate": round(100 * sum(p["hit"] for p in sent) / len(sent)) if sent else None,
+                      "open": sum(1 for p in waiting if p.get("sent"))}
     out["paper"] = paper_summary(s, days)
-    recent_hits = sorted([p for p in s["picks"] if p["hit"] and p["ts"] >= since],
-                         key=lambda p: -p["max"] / p["entry"])[:5]
+    from . import learn
+    out["learn"] = learn.summary(s)
+    recent_hits = sorted([p for p in recent if p["hit"]], key=lambda p: -p["max"] / p["entry"])[:5]
     return out, recent_hits
 
 

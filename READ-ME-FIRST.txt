@@ -1,0 +1,13 @@
+Upload all 10 files in the "scanner" folder onto:
+  https://github.com/williamsqui/Fomo/upload/main/scanner
+Click "Commit changes". No workflow files needed.
+
+This includes everything from fomo-watch.zip as well, so upload only this one.
+
+New: a second paper-trading book that copies ether_monk. It appears in your
+8:00 and 18:00 emails as "Copying @ether_monk (paper only)". The first scan
+after uploading only records what he already holds; trades start from his
+next buy.
+
+To follow someone else later: Settings -> Secrets and variables -> Actions ->
+Variables -> COPY_TRADER = their handle. Leave it blank to switch it off.

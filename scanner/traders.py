@@ -61,6 +61,12 @@ def _rate(s, handle):
 
 
 def trust(s, handle):
+    """Leaderboard reputation x what the paper trades taught about this trader's picks."""
+    from .learn import trader_factor
+    return round(_rep_trust(s, handle) * trader_factor(s, handle), 3)
+
+
+def _rep_trust(s, handle):
     """Multiplier for this trader's buys. 1.0 = neutral, and neutral is the safe default.
 
     Returns 1.0 for everyone until there are TRUST_MIN_DAYS of history, because with

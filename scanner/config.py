@@ -133,6 +133,17 @@ TRACK_WINDOW_HOURS = _int("TRACK_WINDOW_HOURS", 48)
 PAPER_SIZE_USD = _float("PAPER_SIZE_USD", 30)
 PAPER_LAG_MIN = _int("PAPER_LAG_MIN", 20)
 PAPER_SLIPPAGE_PCT = _float("PAPER_SLIPPAGE_PCT", 1)
+# Learning from paper trades (learn.py). Only ever makes the scanner stricter.
+LEARN_MIN_TRADES = _int("LEARN_MIN_TRADES", 20)   # closed paper trades before anything changes
+LEARN_MIN_GROUP = _int("LEARN_MIN_GROUP", 8)      # trades needed on each side of a comparison
+LEARN_DAYS = _int("LEARN_DAYS", 30)               # only recent lessons count
+
+# ---- Copy one trader (paper only) --------------------------------------------
+COPY_TRADER = os.getenv("COPY_TRADER", "ether_monk")   # blank to switch this off
+COPY_SIZE_USD = _float("COPY_SIZE_USD", 30)
+COPY_MAX_DAYS = _float("COPY_MAX_DAYS", 7)             # give up if they never sell
+COPY_SOLANA_WALLET = os.getenv("COPY_SOLANA_WALLET", "")   # optional: skip the lookup
+COPY_EVM_WALLET = os.getenv("COPY_EVM_WALLET", "")
 
 STATE_DIR = os.getenv("STATE_DIR", "state")
 

@@ -11,7 +11,7 @@ import sys
 import time
 
 from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
-               solana, state as st, traders as reputation, xsocial)
+               solana, state as st, traders as reputation, xsocial, learn)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("check")
@@ -139,6 +139,7 @@ def analyze(s, m):
     if notes:
         r["why_not"] = notes + r["why_not"]
         r["qualified"] = False
+    learn.gate(s, r)
     r["checked_at"] = time.time()
     r["live_holders"] = live_ok           # were all top-100 wallets actually read?
     r["exited"] = exited                  # bought earlier, holds none now = sold out
