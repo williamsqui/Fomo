@@ -118,11 +118,14 @@ def copy_table(s):
     recent = ", ".join(f"${e(t['symbol'])} {_usd(t['mirror']['pnl'])} ({e(t['mirror']['how'])})"
                        for t in c["recent"]) or "none closed yet"
     holding = ", ".join("$" + e(x) for x in c["holding"]) or "nothing"
+    n_un = c.get("unnamed") or 0
+    unnamed = (f" · {n_un} of their buys skipped (DexScreener has no price or ticker for them,"
+               " usually LP/receipt tokens or a mint that's minutes old)") if n_un else ""
     return f"""<h3 style="margin:18px 0 6px">Copying @{e(c['handle'])} (paper only)</h3>
 <p style="font-size:12px;color:#555;margin:0 0 6px">Every coin they buy is paper-bought at ${c['size']:.0f} within 10 minutes of
 their wallet showing it, then closed two ways: when <b>they</b> sell (or after {config.COPY_MAX_DAYS:.0f} days), and by <b>your</b> rules
 (+{config.TARGET_GAIN_PCT:.0f}% / -{config.STOP_LOSS_PCT:.0f}% / {config.TRACK_WINDOW_HOURS}h). Fees and slippage included. Watching {c['chains']}.
-Running {days:.1f} days · {c['open']} open: {holding}</p>
+Running {days:.1f} days · {c['open']} open: {holding}{unnamed}</p>
 <table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
 <tr style="background:#f3f3f3"><th>Exit style</th><th>Closed</th><th>Winners</th><th>Avg / trade</th><th>Total</th></tr>
 {row("Their exits", c["their"])}{row("Your rules", c["yours"])}</table>

@@ -11,6 +11,10 @@ wallet HOLDS now and compares it with the last scan.
 Solana costs 2 Helius credits per scan; Base and Robinhood are read free from Blockscout.
 BNB Chain has no free holdings feed, so buys there are missed (it says so in the email).
 
+Each chain keeps its OWN snapshot and is only compared with itself when that chain was read
+successfully this scan. Without that, one failed read (a Blockscout hiccup) wiped a chain from
+the snapshot and the next good scan saw every coin on it as a brand-new buy.
+
 Each paper trade is scored two ways, so you can see whose exits are better:
   * their exit  - you get out when they do (or after COPY_MAX_DAYS)
   * your rules  - +50% target, -30% stop, or 48h, the same rules as your own paper trading
@@ -33,14 +37,39 @@ BLOCKSCOUT = {"base": "https://base.blockscout.com",
 GREW, SHRANK = 1.05, 0.5
 
 
+UNNAMED = ("", "?", "UNKNOWN", "unknown", "Unknown", "None")
+
+
+def named(sym):
+    """DexScreener returns "UNKNOWN"/"?" for tokens it has no metadata for (LP and receipt
+    tokens, brand-new mints). Those are not coins we can copy or show a ticker for."""
+    return (sym or "").strip() not in UNNAMED
+
+
 def _book(s):
     b = s.setdefault("copy", {})
     b.setdefault("handle", config.COPY_TRADER)
     b.setdefault("wallets", {})
-    b.setdefault("snap", {})
     b.setdefault("trades", [])
     b.setdefault("started", 0)
+    b.setdefault("snaps", {})            # chain -> {token key: amount}, one baseline per chain
+    b.setdefault("unnamed", 0)           # their buys we couldn't price/name (not copied)
+    if b.pop("snap", None) and not b["snaps"]:
+        b["snaps"] = {}                  # old single-chain snapshot: start the baselines again
+        b["started"] = 0
+    if not b.get("cleaned"):             # once: drop trades the old partial-read bug invented
+        b["trades"] = [t for t in b["trades"]
+                       if t["mirror"]["done"] or named(t.get("symbol"))]
+        b["cleaned"] = True
     return b
+
+
+QUOTES = {a.lower() for a in chains.QUOTE_ADDRESSES} | set(chains.QUOTE_ADDRESSES)
+
+
+def _skip(chain, addr):
+    """Stablecoins, wrapped natives and other non-meme balances are not trades."""
+    return addr in QUOTES or addr.lower() in QUOTES
 
 
 # ------------------------------------------------------------------ whose wallets
@@ -82,7 +111,7 @@ def solana_holdings(s, w):
                 amt = float(info["tokenAmount"]["uiAmount"] or 0)
             except (KeyError, TypeError, ValueError):
                 continue
-            if amt > 0:
+            if amt > 0 and not _skip("solana", info["mint"]):
                 out[chains.key("solana", info["mint"])] = amt
     return out
 
@@ -103,29 +132,33 @@ def evm_holdings(chain, w):
             amt = int(row.get("value") or 0) / 10 ** int(tok.get("decimals") or 18)
         except (TypeError, ValueError):
             continue
-        if amt > 0 and tok.get("address"):
+        if amt > 0 and tok.get("address") and not _skip(chain, tok["address"]):
             out[chains.key(chain, tok["address"])] = amt
     return out
 
 
 def holdings(s, w):
-    """{token key: amount} across every chain we can read for free, or {} if all failed."""
-    out, ok = {}, False
+    """{chain: {token key: amount}} - a chain maps to None when we could not read it."""
+    out = {}
     if w.get("solana") and "solana" in config.CHAINS and config.HELIUS_API_KEY:
-        h = solana_holdings(s, w["solana"])
-        if h is not None:
-            out.update(h)
-            ok = True
+        out["solana"] = solana_holdings(s, w["solana"])
     for chain in BLOCKSCOUT:
         if chain in config.CHAINS and w.get("evm"):
-            h = evm_holdings(chain, w["evm"])
-            if h is not None:
-                out.update(h)
-                ok = True
-    return out if ok else None
+            out[chain] = evm_holdings(chain, w["evm"])
+    return out
 
 
 # ------------------------------------------------------------------ the paper book
+def tradeable(m):
+    """Only copy a buy we can actually name and price - not LP/receipt/unnamed tokens."""
+    if not m or m["price"] <= 0:
+        return False
+    sym = (m.get("symbol") or "").strip()
+    if not named(sym) or sym.upper() in chains.QUOTE_SYMBOLS:
+        return False
+    return m["liquidity"] >= config.MIN_LIQUIDITY_USD / 3
+
+
 def _open(b, k, m, now):
     if any(t["key"] == k and not t["mirror"]["done"] for t in b["trades"]):
         return None
@@ -151,16 +184,27 @@ def scan(s):
     if not (w.get("solana") or w.get("evm")):
         return []
     now = time.time()
-    held = holdings(s, w)
-    if held is None:
-        log.info("copy: couldn't read %s's wallets this scan", b["handle"])
+    reads = holdings(s, w)
+    bought, sold, read_ok = [], [], []
+    for chain, held in reads.items():
+        if held is None:
+            log.info("copy: couldn't read %s's %s balances this scan - that chain is left alone",
+                     b["handle"], chain)
+            continue
+        read_ok.append(chain)
+        prev = b["snaps"].get(chain)
+        b["snaps"][chain] = held
+        if prev is None:                  # first good read of this chain: baseline only
+            log.info("copy: baseline of %d coins %s already holds on %s",
+                     len(held), b["handle"], chain)
+            continue
+        bought += [k for k, a in held.items() if a > (prev.get(k, 0) * GREW if k in prev else 0)]
+        sold += [k for k, a in prev.items() if held.get(k, 0) < a * SHRANK]
+    if not read_ok:
+        log.info("copy: couldn't read any of %s's wallets this scan", b["handle"])
         return []
-    prev, first = b["snap"], not b["started"]
-    bought = [k for k, a in held.items() if a > (prev.get(k, 0) * GREW if k in prev else 0)]
-    sold = [k for k, a in prev.items() if held.get(k, 0) < a * SHRANK]
-    b["snap"], b["started"] = held, b["started"] or now
-    if first:
-        log.info("copy: baseline of %d coins %s already holds", len(held), b["handle"])
+    if not b["started"]:
+        b["started"] = now
         return []
 
     keys = list({*bought, *sold, *[t["key"] for t in b["trades"] if not t["mirror"]["done"]]})
@@ -168,11 +212,15 @@ def scan(s):
     opened = []
     for k in bought:
         m = markets.get(k)
-        if m and m["price"] > 0 and m["liquidity"] >= config.MIN_LIQUIDITY_USD / 3:
-            t = _open(b, k, m, now)
-            if t:
-                opened.append(t)
-                log.info("copy: %s bought %s", b["handle"], m["symbol"])
+        if not tradeable(m):
+            b["unnamed"] = b.get("unnamed", 0) + 1
+            log.info("copy: %s bought %s but DexScreener can't name/price it - skipped",
+                     b["handle"], k)
+            continue
+        t = _open(b, k, m, now)
+        if t:
+            opened.append(t)
+            log.info("copy: %s bought %s", b["handle"], m["symbol"])
 
     for t in b["trades"]:
         m = markets.get(t["key"])
@@ -210,6 +258,15 @@ def _tally(parts):
             "pnl": round(sum(pnl), 2), "avg": round(sum(pnl) / len(pnl), 2)}
 
 
+def label(t):
+    """A name for the email: their symbol, or a short address when we never got one."""
+    sym = (t.get("symbol") or "").strip()
+    if named(sym):
+        return sym
+    a = chains.split(t["key"])[1]
+    return f"{a[:4]}..{a[-4:]}"
+
+
 def summary(s, days=30):
     b = s.get("copy") or {}
     ts = [t for t in (b.get("trades") or []) if t["ts"] >= time.time() - days * 86400]
@@ -220,5 +277,7 @@ def summary(s, days=30):
             "their": _tally([t["mirror"] for t in ts]), "yours": _tally([t["rules"] for t in ts]),
             "recent": sorted([t for t in ts if t["mirror"].get("done")],
                              key=lambda t: -t["mirror"]["exit_ts"])[:5],
-            "holding": [t["symbol"] for t in ts if not t["mirror"]["done"]][:8],
+            "holding": [label(t) for t in ts if not t["mirror"]["done"]][:8],
+            "unnamed": b.get("unnamed", 0),
+            "read": sorted(b.get("snaps") or {}),
             "chains": "Solana, Base and Robinhood (BNB buys aren't visible for free)"}
