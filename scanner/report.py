@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from . import chains, config, copy as copybook, tracker, traders as reputation, watchlist
 from .sizing import fmt
+from .traders import tag
 
 log = logging.getLogger("report")
 TIER_COLOR = {"HIGH": "#0a7d38", "MEDIUM": "#b36b00", "LOW": "#6b6b6b"}
@@ -174,10 +175,20 @@ Prices are checked every 10 min, so real fills will differ a little. {note}</p>
 <tr style="background:#f3f3f3"><th>Score</th><th>Trades</th><th>+50% hit</th><th>Stopped</th><th>Total P&amp;L</th><th>Avg / trade</th></tr>{rows}</table>"""
 
 
+def coverage(s):
+    c = s.get("wallet_cov")
+    if not c:
+        return ""
+    held = sum(1 for sn in (s.get("wallet_snap") or {}).values()
+               if time.time() - sn["ts"] <= config.HOLDINGS_MAX_AGE_MIN * 60)
+    return (f"Solana top-trader wallets read this scan: {c['read']}/{c['tried']} "
+            f"({held} with holdings under {config.HOLDINGS_MAX_AGE_MIN} min old).<br>")
+
+
 def footer(s, stats):
-    return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} leaderboard traders · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
-{stats['candidates']} coins seen ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
-{e(reputation.summary(s))}<br>
+    return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} traders (top 100 + {len(config.FOLLOW_TRADERS)} you follow) · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
+{stats['candidates']} coins seen{f" (incl. {stats['held']} top traders are holding)" if stats.get('held') else ''} ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
+{coverage(s)}{e(reputation.summary(s))}<br>
 {(e(watchlist.summary(s)) + '<br>') if watchlist.summary(s) else ''}
 Bankroll setting ${config.BANKROLL_USD:.0f} (update BANKROLL_USD as it changes). Budget: FOMO API {s['fomo_credits_used']:,}/{config.FOMO_MONTHLY_CREDITS:,} ·
 Helius {s['helius_credits_used']:,}/{config.HELIUS_MONTHLY_CREDITS:,} · X ${s['x_calls'] * 0.001:.2f}<br>
@@ -203,7 +214,7 @@ def build(picks, summ, hits, s, stats, alerts, instant=False):
     return subject, body
 
 
-WEAK_LABEL = {"smart": "no top-100 traders buying or holding", "chart": "weak or unclear chart",
+WEAK_LABEL = {"smart": "no top-100 or followed traders buying or holding", "chart": "weak or unclear chart",
               "momentum": "little buying momentum right now", "setup": "weak setup (liquidity / safety / holders)",
               "social": "little X or Telegram buzz", "community": "not trending on FOMO"}
 
@@ -278,7 +289,7 @@ def build_check(r, holders, s):
         verdict = (f"<div style='background:#fdeeee;border-radius:8px;padding:10px;font-size:14px'>"
                    f"<b>Scanner verdict: would NOT send this</b><ul style='margin:6px 0 0 18px;padding:0'>{items}</ul></div>")
     if holders:
-        rows = "".join(f"<tr><td>#{h['rank']}</td><td>{e(h['handle'])}</td><td>{_money(h['usd'])}</td></tr>" for h in holders[:15])
+        rows = "".join(f"<tr><td>{tag(h['rank'])}</td><td>{e(h['handle'])}</td><td>{_money(h['usd'])}</td></tr>" for h in holders[:15])
         total = sum(h["usd"] for h in holders)
         hold = (f"<h3 style='margin:14px 0 6px'>Top-100 FOMO traders holding it: {len(holders)} (≈{_money(total)})</h3>"
                 f"<table style='border-collapse:collapse;font-size:13px;width:100%' border='1' cellpadding='4'>"

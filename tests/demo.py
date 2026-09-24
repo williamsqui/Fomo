@@ -12,9 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # make a digest due "now" so the demo sends one 
 _due = time.strftime("%H:%M", time.gmtime(time.time() + 7 * 3600 - 1800))  # Vietnam time, 30 min ago
 os.environ.update(FOMO_API_KEY="demo", HELIUS_API_KEY="demo", GETXAPI_KEY="demo",
-                  STATE_DIR="out/demo_state", GT_SLEEP_SEC="0", DIGEST_TIMES=_due)
+                  STATE_DIR="out/demo_state", GT_SLEEP_SEC="0", DIGEST_TIMES=_due,
+                  WATCH_REQ_DIR="out/watchreq", HELIUS_RPS="100000")
 
-from scanner import chart, dex, evm, fomo, safety, socials, solana, xsocial  # noqa: E402
+from scanner import chart, copy, dex, evm, fomo, safety, socials, solana, xsocial  # noqa: E402
 
 random.seed(3)
 NOW = time.time()
@@ -91,9 +92,18 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
                                     for i, k in enumerate(list(COINS)[:6])]}, {"x-credits-cost": "250"})
         if "/leaderboard/" in url:
             return Resp({"traders": TRADERS}, {"x-credits-cost": "250"})
+        if "/v2/users/" in url:                      # profile lookup (copy-trader book, followed traders)
+            h = url.rsplit("/", 1)[1]
+            if h.lower() == "ether_monk":
+                w = TRADERS[0]["wallets"]
+            else:
+                w = {"solana": "F" + h[:10].ljust(10, "x") + "y" * 33, "evm": "0x" + format(abs(hash(h)) % 16 ** 40, "040x")}
+            return Resp({"user": {"handle": h, "wallets": w}}, {"x-credits-cost": "2500"})
         if "/thesis/" in url:
             return Resp([{"handle": "trader3", "text": "LP burned, strong community", "likes": 90}] * 7, {"x-credits-cost": "1250"})
     if "helius" in url:
+        if len(json) > 10:        # like the real free plan: big batches get HTTP 429
+            return None
         out = []
         for call in json:
             if call["method"] == "getTokenLargestAccounts":
@@ -105,6 +115,14 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
             if call["method"] == "getMultipleAccounts":
                 out.append({"id": call["id"], "result": {"value": [
                     {"data": {"parsed": {"info": {"owner": a[4:]}}}} for a in call["params"][0]]}})
+                continue
+            if call["method"] == "getTokenAccountsByOwner" and "programId" in call["params"][1]:
+                w = call["params"][0]                 # every SPL holding of one wallet (classic program)
+                classic = call["params"][1]["programId"].startswith("Tokenkeg")
+                mints = [k.split(":")[1] for k in buys.get(w, []) if k.startswith("solana:")] if classic else []
+                out.append({"id": call["id"], "result": {"value": [
+                    {"account": {"data": {"parsed": {"info": {
+                        "mint": m, "tokenAmount": {"uiAmount": 1e5}}}}}} for m in mints]}})
                 continue
             if call["method"] == "getTokenAccountsByOwner":
                 w, mint = call["params"][0], call["params"][1]["mint"]
@@ -218,6 +236,8 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
         return Resp({"result": {addr: {"is_honeypot": hp, "buy_tax": "0", "sell_tax": "0.99" if hp == "1" else "0",
                                        "is_open_source": "1", "holders": [{"percent": "0.03", "is_contract": "0"}] * 10,
                                        "lp_holders": [{"percent": "0.95", "is_locked": "1"}]}}})
+    if "blockscout" in url and "token-balances" in url:
+        return Resp([])                               # the demo trader holds nothing on EVM
     if "t.me" in url:
         name = url.rsplit("/", 1)[1].upper()
         n = next((v[10] for v in COINS.values() if v[0] == name), 0)
@@ -233,7 +253,7 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
     raise RuntimeError("unmocked " + url)
 
 
-for mod in (dex, fomo, solana, evm, xsocial, chart, safety, socials):
+for mod in (dex, fomo, solana, evm, xsocial, chart, safety, socials, copy):
     mod.request = fake_request
 
 if __name__ == "__main__":

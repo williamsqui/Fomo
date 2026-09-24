@@ -1,7 +1,7 @@
 """Watch leaderboard traders' Solana wallets for new buys/sells (Helius free RPC).
 
-Cost: 1 credit per getSignaturesForAddress + 1 per getTransaction.
-Top 50 wallets every scan, the rest every 3rd scan (~290k/month), plus parsed txs.
+Cost: 2 credits per wallet read (one per token program).
+Top 50 wallets every scan, the rest every 3rd scan (~575k of the 1M free credits a month).
 """
 import logging
 import time
@@ -99,42 +99,118 @@ def parse_swap(tx, wallet):
     return events
 
 
-def scan_wallets(s, traders, sol_price):
-    now = time.time()
-    since = now - config.LOOKBACK_HOURS * 3600
-    new_events = 0
-    for t in traders:
-        w = t.get("wallet")
-        if not w or not config.HELIUS_API_KEY:
-            continue
-        opts = {"limit": 25}
-        if s["wallet_cursor"].get(w):
-            opts["until"] = s["wallet_cursor"][w]
-        res = _rpc(s, [("getSignaturesForAddress", [w, opts])])
-        if res is None:
-            log.info("Helius budget pacing reached; stopping wallet scan")
+TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",     # SPL Token
+                  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]     # Token-2022 (newer launches)
+CHANGE = 0.02        # balance moves smaller than 2% are rounding / rebases, not trades
+OUT = 0.2            # under 20% of what they had = sold out (anything less is a trim)
+
+
+def read_holdings(s, wallets):
+    """{wallet: {mint: amount}} for each wallet read COMPLETELY this scan.
+
+    Both token programs must come back for a wallet to count as read - half a read would make
+    every coin on the missing program look sold.
+    """
+    out = {}
+    calls = lambda ws: [("getTokenAccountsByOwner", [w, {"programId": p}, {"encoding": "jsonParsed"}])
+                        for w in ws for p in TOKEN_PROGRAMS]
+    dead = 0                                          # consecutive batches where nothing came back
+    for i in range(0, len(wallets), 5):              # 5 wallets = 10 calls = one Helius batch
+        chunk = wallets[i:i + 5]
+        res = _rpc(s, calls(chunk))
+        if res is None:                               # monthly pacing: leave the rest for later
             break
-        sigs = [x for x in (res[0] or []) if not x.get("err") and (x.get("blockTime") or 0) >= since]
-        if res[0]:
-            s["wallet_cursor"][w] = res[0][0]["signature"]
-        sigs = sigs[:config.MAX_TX_PER_WALLET_PER_RUN]
-        if not sigs:
+        whole_fail = all(r is None for r in res)
+        if dead >= 2:                                 # Helius is down: don't burn the whole run
+            log.info("Solana holdings: Helius not answering - stopping this scan's wallet reads")
+            break
+        got_any = not whole_fail
+        for j, w in enumerate(chunk):
+            parts = res[2 * j:2 * j + 2]
+            if any(r is None for r in parts) and (not whole_fail or dead == 0):
+                # one whale wallet with thousands of token accounts can make the whole batch too
+                # big - give each wallet one try on its own so the others still get read
+                parts = _rpc(s, calls([w])) or [None, None]
+            if any(r is None for r in parts):
+                continue
+            got_any = True
+            bal = {}
+            for r in parts:
+                for acc in (r.get("value") or []):
+                    try:
+                        info = acc["account"]["data"]["parsed"]["info"]
+                        ta = info["tokenAmount"]
+                        amt = float(ta.get("uiAmountString") or ta.get("uiAmount") or 0)
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if amt > 0 and info["mint"] not in QUOTES:
+                        bal[info["mint"]] = bal.get(info["mint"], 0.0) + amt
+            out[w] = bal
+        dead = 0 if got_any else dead + 1             # batch AND single retries all failed
+    return out
+
+
+def scan_wallets(s, traders, now=None):
+    """Read what each trader's wallet holds and turn changes since their last read into events.
+
+    Replaces reading transactions. That approach fetched a wallet's 25 newest transactions,
+    parsed only 10, and marked all 25 as seen - so a busy trader's buys (or a wallet full of
+    spam airdrops) were silently lost, and a sell with no matching buy scored as a full exit.
+    A holdings diff can't miss a position change, whatever happened in between.
+    Events carry usd=None; main.py prices them with DexScreener and drops unpriced dust/spam.
+    """
+    now = now or time.time()
+    snaps = s.setdefault("wallet_snap", {})
+    by = {t["wallet"]: t for t in traders if t.get("wallet")}
+    if not by or not config.HELIUS_API_KEY:
+        return 0
+    read = read_holdings(s, list(by))
+    events = 0
+    for w, bal in read.items():
+        prev = snaps.get(w)
+        snaps[w] = {"ts": now, "bal": bal}
+        if prev is None:                  # first read of this wallet: baseline, not a buy
             continue
-        txs = _rpc(s, [("getTransaction", [x["signature"], {
-            "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}]) for x in sigs])
-        for sig, tx in zip(sigs, txs or []):
-            for mint, side, amt, sol, usd in parse_swap(tx, w):
-                if mint in chains.QUOTE_ADDRESSES:
-                    continue
-                s["trader_buys"].append({
-                    "ts": sig.get("blockTime") or now, "sig": sig["signature"],
-                    "wallet": w, "handle": t["handle"], "rank": t["rank"],
-                    "key": chains.key("solana", mint), "side": side, "amount": amt,
-                    "usd": round(usd + sol * sol_price, 2)})
-                new_events += 1
-    dedupe(s)
-    log.info("Solana wallet scan: %d new trader swaps", new_events)
-    return new_events
+        t, old_bal = by[w], prev["bal"]
+        # The change happened some time since the last read. Normally that's 10-30 min, but after
+        # a gap (Helius outage, skipped runs) a buy from hours ago must not look brand new: date
+        # it at the earliest possible time so it can't pass as a fresh signal or dodge "too late".
+        # (Sells keep the time we saw them, so an exit alert is never dated before your buy.)
+        gap = now - prev["ts"] > config.HOLDINGS_MAX_AGE_MIN * 60
+        for mint in set(bal) | set(old_bal):
+            new, old = bal.get(mint, 0.0), old_bal.get(mint, 0.0)
+            if new > old * (1 + CHANGE):
+                side, amt = "buy", new - old
+            elif new < old * (1 - CHANGE):
+                side, amt = "sell", old - new
+            else:
+                continue
+            when = prev["ts"] if gap and side == "buy" else now
+            e = {"ts": when, "sig": f"snap-{w}-{mint}-{int(now)}-{side}", "wallet": w,
+                 "handle": t["handle"], "rank": t["rank"], "key": chains.key("solana", mint),
+                 "side": side, "amount": amt, "usd": None, "src": "snap", "left": new, "seen": now}
+            if gap:
+                e["gap"] = True
+            if side == "sell":
+                e["out"] = new < old * OUT
+            s["trader_buys"].append(e)
+            events += 1
+    s["wallet_cov"] = {"read": len(read), "tried": len(by), "ts": now}
+    if len(read) < len(by):
+        log.info("Solana holdings: read %d/%d wallets (%s)", len(read), len(by), LAST_FAIL[0] or "errors")
+    log.info("Solana holdings scan: %d position changes", events)
+    return events
+
+
+def holder_index(s, by_sol, now=None):
+    """{token key: {wallet: amount}} from recent full wallet reads of current leaderboard traders."""
+    now = now or time.time()
+    idx = {}
+    for w, sn in (s.get("wallet_snap") or {}).items():
+        if w in by_sol and now - sn["ts"] <= config.HOLDINGS_MAX_AGE_MIN * 60:
+            for mint, amt in sn["bal"].items():
+                idx.setdefault(chains.key("solana", mint), {})[w] = amt
+    return idx
 
 
 def dedupe(s):
@@ -146,39 +222,3 @@ def dedupe(s):
             seen.add(k)
             uniq.append(e)
     s["trader_buys"] = uniq
-
-
-def top_holders(s, mint):
-    """{owner wallet: amount} for the 20 largest holders of a mint (2 Helius credits).
-
-    Returns (snapshot, floor) where floor is the smallest balance in the top 20, or None on failure.
-    """
-    res = _rpc(s, [("getTokenLargestAccounts", [mint])])
-    accts = ((res or [None])[0] or {}).get("value") or []
-    if not accts:
-        return None, 0.0
-    addrs = [a["address"] for a in accts]
-    amts = [float(a.get("uiAmount") or 0) for a in accts]
-    res = _rpc(s, [("getMultipleAccounts", [addrs, {"encoding": "jsonParsed"}])])
-    infos = ((res or [None])[0] or {}).get("value") or []
-    snap = {}
-    for info, amt in zip(infos, amts):
-        try:
-            owner = info["data"]["parsed"]["info"]["owner"]
-        except (KeyError, TypeError):
-            continue
-        snap[owner] = snap.get(owner, 0.0) + amt
-    return snap, (min(amts) if len(amts) >= 20 else 0.0)
-
-
-def holdings_snapshot(s, m, by_addr, max_age_min=30):
-    """Refresh which leaderboard wallets are among this coin's top holders (at most every 30 min)."""
-    from .evm import apply_snapshot
-    h = (s.get("holdings") or {}).get(m["key"])
-    if h and time.time() - h["ts"] < max_age_min * 60:
-        return 0
-    snap, floor = top_holders(s, m["address"])
-    if snap is None:
-        return 0
-    mine = {w: a for w, a in snap.items() if w in by_addr}
-    return apply_snapshot(s, m["key"], m["price"], mine, by_addr, sell_floor=floor)

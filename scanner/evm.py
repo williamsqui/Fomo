@@ -274,8 +274,12 @@ def holding_events(s, k, price, by_addr, max_age_min=120):
     return out
 
 
-def holdings_scan(s, traders, markets, max_per_chain=8):
-    """Snapshot leaderboard holdings of EVM candidate coins; diffs become buy/sell events."""
+def holdings_scan(s, traders, markets, max_per_chain=12):
+    """Snapshot leaderboard holdings of EVM candidate coins; diffs become buy/sell events.
+
+    Coins top traders have touched go first, so the ones we score on smart money always have a
+    fresh "who still holds it" read (otherwise a trim with no visible buy looks like an exit)."""
+    touched = {e["key"] for e in s.get("trader_buys") or []} | set(s.get("holdings") or {})
     by_addr = {t["evm"]: t for t in traders if t.get("evm")}
     wallets = list(by_addr)
     if not wallets:
@@ -286,13 +290,17 @@ def holdings_scan(s, traders, markets, max_per_chain=8):
         if m["chain"] != "solana" and m["chain"] in config.EVM_RPC and m["chain"] in config.CHAINS:
             per_chain.setdefault(m["chain"], []).append(m)
     for chain, ms in per_chain.items():
-        ms.sort(key=lambda m: -m["volume"].get("h1", 0))
+        ms.sort(key=lambda m: (m["key"] not in touched, -m["volume"].get("h1", 0)))
         for m in ms[:max_per_chain]:
             try:
-                raw = balances(chain, m["address"], wallets)
+                raw, complete = balances_checked(chain, m["address"], wallets)
             except RPCError as e:
                 log.info("%s holdings check failed: %s", chain, e)
                 break
+            if not complete:
+                # a wallet we couldn't read is NOT a wallet that sold: keep the last full snapshot
+                log.info("%s holdings of %s only partly read - snapshot not updated", chain, m["symbol"])
+                continue
             dec = _decimals(s, chain, m["address"])
             events += apply_snapshot(s, m["key"], m["price"], {w: v / 10 ** dec for w, v in raw.items()}, by_addr)
     dedupe(s)

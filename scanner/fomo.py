@@ -60,6 +60,73 @@ def leaderboard(s):
     return s["leaderboard"]["traders"]
 
 
+OFF_BOARD = 101          # rank given to a followed trader who isn't on the top-100 right now
+
+
+def _norm(h):
+    return (h or "").lower().lstrip("@")
+
+
+def followed(s):
+    """Wallets of the traders you follow: {handle: {"wallet", "evm"}}. Looked up once each.
+
+    Free if they're on the leaderboard or are the copy-trader; otherwise one FOMO profile
+    lookup (2,500 credits), at most 3 per scan, cached for 30 days."""
+    cache = s.setdefault("followed", {})
+    board = {_norm(t["handle"]): t for t in (s.get("leaderboard") or {}).get("traders") or []}
+    overrides = dict(x.split(":", 1) for x in config.FOLLOW_SOLANA_WALLETS.split(",") if ":" in x)
+    looked = 0
+    for h in config.FOLLOW_TRADERS:
+        n = _norm(h)
+        c = cache.get(n)
+        if n in board and (board[n].get("wallet") or board[n].get("evm")):
+            cache[n] = {"handle": h, "wallet": board[n].get("wallet"), "evm": board[n].get("evm"), "ts": time.time()}
+            continue
+        if c and time.time() - c["ts"] < 30 * 86400 and (c.get("wallet") or c.get("evm")):
+            continue
+        cw = ((s.get("copy") or {}).get("wallets") or {}) if n == _norm((s.get("copy") or {}).get("handle")) else {}
+        if cw.get("solana") or cw.get("evm"):
+            cache[n] = {"handle": h, "wallet": cw.get("solana"), "evm": cw.get("evm"), "ts": time.time()}
+            continue
+        if looked >= 3 or (c and time.time() - c.get("tried", 0) < 6 * 3600):
+            continue
+        looked += 1
+        d = _get(s, f"/v2/users/{h.lstrip('@')}", 2500)
+        u = ((d or {}).get("user") or d or {}) if isinstance(d, dict) else {}
+        w = u.get("wallets") or {}
+        if w.get("solana") or w.get("evm"):
+            cache[n] = {"handle": u.get("handle") or h, "wallet": w.get("solana"),
+                        "evm": (w.get("evm") or "").lower() or None, "ts": time.time()}
+            log.info("followed trader %s: wallets found", h)
+        else:
+            cache[n] = {**(c or {}), "handle": h, "tried": time.time(), "ts": (c or {}).get("ts", 0)}
+            log.info("followed trader %s: couldn't find their wallets yet", h)
+    for h, addr in overrides.items():
+        n = _norm(h)
+        cache[n] = {**cache.get(n, {}), "handle": cache.get(n, {}).get("handle", h), "wallet": addr.strip(),
+                    "ts": time.time()}
+    keep = {_norm(h) for h in config.FOLLOW_TRADERS} | {_norm(h) for h in overrides}
+    s["followed"] = {n: c for n, c in cache.items() if n in keep}
+    return s["followed"]
+
+
+def tracked(s):
+    """Everyone whose wallets we watch: the top 100 plus the traders you follow.
+
+    Followed traders who are also on the board keep their real rank; the rest get rank 101
+    (shown as "followed" in emails, weighted like a #FOLLOW_RANK trader)."""
+    lb = leaderboard(s)
+    fol = followed(s)
+    on_board = {_norm(t["handle"]) for t in lb}
+    out = [dict(t, followed=_norm(t["handle"]) in fol) for t in lb]
+    seen = {t.get("wallet") for t in lb} | {t.get("evm") for t in lb}
+    for n, c in fol.items():
+        if n not in on_board and (c.get("wallet") or c.get("evm")) and not ({c.get("wallet"), c.get("evm")} & seen - {None}):
+            out.append({"rank": OFF_BOARD, "handle": c["handle"], "pnlUsd": 0, "wallet": c.get("wallet"),
+                        "evm": c.get("evm"), "followed": True})
+    return out
+
+
 def trending(s):
     tr = s["trending"]
     if time.time() - tr["ts"] > config.TRENDING_REFRESH_HOURS * 3600:

@@ -13,7 +13,7 @@ DEFAULT = {
     "x_calls": 0,
     "leaderboard": {"ts": 0, "traders": []},
     "trending": {"ts": 0, "tokens": []},
-    "wallet_cursor": {},      # solana wallet -> last seen signature
+    "wallet_snap": {},        # solana wallet -> {"ts", "bal": {mint: amount}} (full holdings read)
     "evm_cursor": {},         # chain -> last scanned block
     "decimals": {},           # token key -> decimals
     "alerts": {},             # token key -> last emailed ts

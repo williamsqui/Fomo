@@ -55,6 +55,7 @@ EMAIL_TO = os.getenv("EMAIL_TO") or SMTP_USER
 INSTANT_SCORE = _int("INSTANT_SCORE", 80)
 INSTANT_SIGNAL_MAX_AGE_MIN = _int("INSTANT_SIGNAL_MAX_AGE_MIN", 120)  # newest top-trader buy must be this fresh
 MAX_RUNUP_PCT = _float("MAX_RUNUP_PCT", 35)    # skip if already up this much since top traders bought
+RUNUP_H6_MAX = _float("RUNUP_H6_MAX", 60)      # ...or, when their buy time is unknown, up this much in 6h
 MAX_DROP_SINCE_SCAN_PCT = _float("MAX_DROP_SINCE_SCAN_PCT", 12)  # skip if dumping while we checked it
 REALERT_HOURS = _int("REALERT_HOURS", 12)      # don't instant-alert the same coin again within this
 DIGEST_TIMES = _list("DIGEST_TIMES", "08:00,18:00")
@@ -70,6 +71,13 @@ FINALISTS = _int("FINALISTS", 12)             # coins whose chart/safety/holders
 LEADERBOARD_WINDOW = os.getenv("LEADERBOARD_WINDOW", "7d")
 LEADERBOARD_SIZE = _int("LEADERBOARD_SIZE", 100)
 LOOKBACK_HOURS = _int("LOOKBACK_HOURS", 6)
+
+# ---- Traders you follow (tracked like the top 100, whether or not they're on it) ----
+# Their wallets are looked up once from their FOMO profile (2,500 FOMO credits each, then cached).
+FOLLOW_TRADERS = _list("FOLLOW_TRADERS", "tjr,frankdegods,OkaySmallSheep,pointfarmcap,DegenToDisciple,"
+                                         "USronaldcarter,orangie,unipcs,ether_monk,DumbCrayonEater")
+FOLLOW_RANK = _int("FOLLOW_RANK", 50)     # a followed trader's buy weighs like a #50 on the board
+FOLLOW_SOLANA_WALLETS = os.getenv("FOLLOW_SOLANA_WALLETS", "")  # optional "handle:address,..." overrides
 
 # ---- Trader reputation -------------------------------------------------------
 # The leaderboard is 7-day PnL, so some of it is luck. We keep our own record of who
@@ -87,6 +95,11 @@ MAX_MCAP_USD = _float("MAX_MCAP_USD", 75_000_000)   # above this, +50% is much r
 MIN_LIQUIDITY_USD = _float("MIN_LIQUIDITY_USD", 75_000)
 MIN_LIQ_TO_MCAP = _float("MIN_LIQ_TO_MCAP", 0.04)
 MIN_PAIR_AGE_HOURS = _float("MIN_PAIR_AGE_HOURS", 12)
+# Earlier entries: a coin can be let in from EARLY_PAIR_AGE_HOURS old if at least
+# EARLY_MIN_HOLDERS top-100 traders hold it right now. It carries a "young coin" warning, and
+# the learner raises the bar on young coins by itself if those paper trades keep losing.
+EARLY_PAIR_AGE_HOURS = _float("EARLY_PAIR_AGE_HOURS", 2)
+EARLY_MIN_HOLDERS = _int("EARLY_MIN_HOLDERS", 2)
 MAX_TOP10_HOLDERS_PCT = _float("MAX_TOP10_HOLDERS_PCT", 45)
 MAX_TAX_PCT = _float("MAX_TAX_PCT", 5)
 # Unlocked liquidity in one ordinary wallet = that person can pull it and the price gaps down
@@ -111,13 +124,17 @@ THESIS_TOKENS_PER_DAY = _int("THESIS_TOKENS_PER_DAY", 2)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 1_000_000)
 HELIUS_RPS = _float("HELIUS_RPS", 8)           # free plan allows 10 requests/second (each batched call counts)
 HELIUS_BATCH = _int("HELIUS_BATCH", 10)        # max calls per batch request
-MAX_TX_PER_WALLET_PER_RUN = _int("MAX_TX_PER_WALLET_PER_RUN", 10)
 X_TOKENS_PER_RUN = _int("X_TOKENS_PER_RUN", 4)
 X_PAGES_PER_TOKEN = _int("X_PAGES_PER_TOKEN", 1)
 GT_SLEEP_SEC = _float("GT_SLEEP_SEC", 6.5)     # GeckoTerminal keyless ~10 calls/min
 X_MONTHLY_CALLS = _int("X_MONTHLY_CALLS", 8000)  # GetXAPI cap (~$8/month)
-FAST_WALLETS = _int("FAST_WALLETS", 50)        # top N wallets checked every run...
-SLOW_WALLET_EVERY = _int("SLOW_WALLET_EVERY", 3)  # ...ranks below N every 3rd run (Helius free tier)
+# Solana: every scan reads what each top trader's wallet HOLDS (2 credits per wallet) and
+# compares it with last time. That catches every buy and sell, however busy the wallet is.
+FAST_WALLETS = _int("FAST_WALLETS", 50)        # top N wallets read every run (~430k credits/month)...
+SLOW_WALLET_EVERY = _int("SLOW_WALLET_EVERY", 3)  # ...ranks below N every 3rd run (~145k/month)
+HOLDINGS_MAX_AGE_MIN = _int("HOLDINGS_MAX_AGE_MIN", 90)  # a wallet read older than this isn't trusted
+HELD_CANDIDATE_MIN = _int("HELD_CANDIDATE_MIN", 3)      # coins this many top traders hold stay watched
+HELD_CANDIDATES_MAX = _int("HELD_CANDIDATES_MAX", 120)
 # per-coin cache (minutes) so 10-minute scans stay inside free limits
 CHART_TTL_MIN = _int("CHART_TTL_MIN", 30)
 INFO_TTL_MIN = _int("INFO_TTL_MIN", 180)

@@ -8,7 +8,7 @@ rate for each score band next to every pick.
 """
 import time
 
-from . import config
+from . import config, holders
 
 BANDS = [(75, 101, "75+"), (62, 75, "62-74"), (50, 62, "50-61")]
 
@@ -50,6 +50,7 @@ FLAG_TYPES = {  # warning text -> short category the learner can count
     "chasing": "chasing a pump", "botted": "botted X chatter", "distribution": "distribution (red volume)",
     "new faces": "only new-face traders", "overextended": "overextended chart",
     "7-day high": "far below 7-day high", "sold:": "a top trader sold", "downtrend": "downtrend",
+    "young coin": "young coin (early entry)",
 }
 
 
@@ -86,8 +87,10 @@ def exit_checks(s, markets):
         if price and price <= p["stop"] and "stop" not in w:
             w.append("stop")
             out.append((p, "hit the stop-loss - exit to protect your bankroll", chg))
+        # only real exits: a whale trimming 10% is taking profit, not leaving (holders.sold_out)
         sold = sorted({e["handle"] for e in s["trader_buys"] if e["key"] == p["key"] and e["side"] == "sell"
-                       and e["ts"] >= p["sent_ts"] and e["handle"] in p["buyers"]} - set(w))
+                       and e["ts"] >= p["sent_ts"] and e["handle"] in p["buyers"]
+                       and holders.sold_out(s, e)} - set(w))
         if sold:
             w.extend(sold)
             out.append((p, f"leaderboard trader(s) who bought are now selling: {', '.join(sold)} - consider exiting", chg))

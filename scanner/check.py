@@ -61,9 +61,10 @@ def solana_holders(s, mint, traders):
     return out, read >= len(ws)
 
 
-def filter_notes(m):
+def filter_notes(m, n_holders=0):
     notes = []
     age_h = (time.time() * 1000 - m["created_ms"]) / 3.6e6 if m["created_ms"] else None
+    need_age = scoring.min_age(n_holders)
     if m["mcap"] < config.MIN_MCAP_USD:
         notes.append(f"market cap ${m['mcap']:,.0f} is below your ${config.MIN_MCAP_USD:,.0f} minimum")
     if m["mcap"] > config.MAX_MCAP_USD:
@@ -72,8 +73,10 @@ def filter_notes(m):
         notes.append(f"liquidity ${m['liquidity']:,.0f} is below ${config.MIN_LIQUIDITY_USD:,.0f}")
     if m["mcap"] and m["liquidity"] / m["mcap"] < config.MIN_LIQ_TO_MCAP:
         notes.append("liquidity is thin compared with market cap")
-    if age_h is not None and age_h < config.MIN_PAIR_AGE_HOURS:
-        notes.append(f"only {age_h:.1f}h old (minimum {config.MIN_PAIR_AGE_HOURS:.0f}h)")
+    if age_h is not None and age_h < need_age:
+        notes.append(f"only {age_h:.1f}h old (minimum {need_age:.0f}h"
+                     + (f", or {config.EARLY_PAIR_AGE_HOURS:.0f}h once {config.EARLY_MIN_HOLDERS}+ top traders hold it)"
+                        if need_age > config.EARLY_PAIR_AGE_HOURS else ")"))
     return notes
 
 
@@ -91,7 +94,7 @@ def analyze(s, m):
     log.info("checking %s (%s) on %s", m["symbol"], m["address"], m["chain"])
 
     # top-100 FOMO traders holding it right now
-    traders = fomo.leaderboard(s)
+    traders = fomo.tracked(s)      # top 100 + the traders you follow
     by_wallet = {t["wallet"]: t for t in traders if t.get("wallet")}
     by_wallet.update({t["evm"]: t for t in traders if t.get("evm")})
     if m["chain"] == "solana":
@@ -119,9 +122,11 @@ def analyze(s, m):
                      if e["side"] == "buy" and live_ok and e["handle"] not in still_in})
     if live_ok:
         events = [e for e in events if e["side"] != "buy" or e["handle"] in still_in]
+    fresh = {e["handle"] for e in s["trader_buys"] if e["key"] == k and e["side"] == "buy" and not e.get("held")}
     for h in holders:
-        events.append({"ts": now, "handle": h["handle"], "rank": h["rank"],
-                       "key": k, "side": "buy", "amount": 0, "usd": round(h["usd"], 2), "held": True})
+        events.append({"ts": now, "handle": h["handle"], "rank": h["rank"], "key": k, "side": "buy",
+                       "amount": 0, "usd": round(h["usd"], 2), "held": True,
+                       "stale": h["handle"] not in fresh})     # same half-weight rule as the scanner
     sm = scoring.smart_money(events, k, reputation.fn(s))
     traded = [e["ts"] for e in events if e["side"] == "buy" and not e.get("held") and e["handle"] in sm["buyers"]]
     sm["first_buy"], sm["last_buy"] = (min(traded), max(traded)) if traded else (None, None)
@@ -135,7 +140,7 @@ def analyze(s, m):
     trending = {t["key"]: t["rank"] for t in (s.get("trending") or {}).get("tokens", []) if "key" in t}
     r = scoring.score(m, sm, x=x, thesis=th, trending_rank=trending.get(k), chart=ch, safety=sf,
                       info=info, tg=tg, deep=True)
-    notes = filter_notes(m)
+    notes = filter_notes(m, len(holders))
     if notes:
         r["why_not"] = notes + r["why_not"]
         r["qualified"] = False

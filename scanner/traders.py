@@ -61,9 +61,27 @@ def _rate(s, handle):
 
 
 def trust(s, handle):
-    """Leaderboard reputation x what the paper trades taught about this trader's picks."""
+    """Leaderboard reputation x what the paper trades taught about this trader's picks.
+
+    Traders you chose to follow start at neutral (1.0) even when they're not on the board -
+    you vouched for them - but the paper-trade learner can still cut them down if their
+    picks keep losing."""
     from .learn import trader_factor
-    return round(_rep_trust(s, handle) * trader_factor(s, handle), 3)
+    rep = _rep_trust(s, handle)
+    if (handle or "").lower().lstrip("@") in {h.lower().lstrip("@") for h in config.FOLLOW_TRADERS}:
+        rep = max(rep, 1.0)
+    return round(rep * trader_factor(s, handle), 3)
+
+
+def rank_weight(rank):
+    """Top-100 rank -> weight 1.0-2.0. Followed traders off the board count as FOLLOW_RANK."""
+    r = config.FOLLOW_RANK if rank > 100 else rank
+    return 1 + (101 - r) / 100
+
+
+def tag(rank):
+    """'#4' for a leaderboard trader, 'followed' for one you added who isn't on it now."""
+    return "followed" if rank > 100 else f"#{rank}"
 
 
 def _rep_trust(s, handle):

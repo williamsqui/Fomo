@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 from . import chains, check, config, report, state as st, watchlist
 from .sizing import fmt
+from .traders import tag
 
 log = logging.getLogger("position")
 e = html.escape
@@ -53,24 +54,24 @@ def decide(r, pnl, value=None):
     exited = r.get("exited") or []
     if sm["buyers"]:
         if live:
-            plus.append(f"{len(sm['buyers'])} top-100 trader(s) still hold it right now (checked live)")
+            plus.append(f"{len(sm['buyers'])} top-100/followed trader(s) still hold it right now (checked live)")
             health += 4
         else:
             # couldn't read the wallets, so this is the scanner's log, not proof they still hold
-            plus.append(f"{len(sm['buyers'])} top-100 trader(s) bought it recently "
+            plus.append(f"{len(sm['buyers'])} top-100/followed trader(s) bought it recently "
                         "(live wallet check unavailable - not confirmed they still hold)")
             health += 2
     if live and exited:
         health -= 8
-        minus.append(f"{len(exited)} top-100 trader(s) who bought it earlier hold none of it now - they sold out")
+        minus.append(f"{len(exited)} top-100/followed trader(s) who bought it earlier hold none of it now - they sold out")
     if live and not sm["buyers"] and not exited:
-        minus.append("no top-100 trader holds it - you're on your own in this one")
+        minus.append("no top-100 or followed trader holds it - you're on your own in this one")
     if sm.get("trimmed"):
         # took some profit but still holds a real position - normal, not a reason to run
         minus.append(f"trimmed a little but still holding: {', '.join(sm['trimmed'][:3])}")
     if sm["sellers"]:
         health -= 15
-        minus.append(f"top-100 trader(s) selling: {', '.join(sm['sellers'][:3])}")
+        minus.append(f"top-100/followed trader(s) selling: {', '.join(sm['sellers'][:3])}")
     ch1, ch6 = m["change"].get("h1", 0), m["change"].get("h6", 0)
     ratio = m["buys_h1"] / (m["sells_h1"] + 1)
     if ch1 < -10 and ratio < 1:
@@ -85,7 +86,7 @@ def decide(r, pnl, value=None):
         if f not in " ".join(minus):
             minus.append(f)
     for g in r["reasons"][:4]:
-        if len(plus) < 5 and "top-100 FOMO trader" not in g and "buy pressure" not in g:
+        if len(plus) < 5 and "FOMO trader(s) bought or hold" not in g and "buy pressure" not in g:
             plus.append(g)
 
     # ---- levels -----------------------------------------------------------
@@ -144,9 +145,9 @@ def build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels):
         cost = max(config.FEE_MIN_USD, value * config.FEE_PCT / 100)
         fee = f"<p style='font-size:12px;color:#555'>Selling now costs about ${cost:.2f} in FOMO fees ({cost / value * 100:.1f}% of this position).</p>"
     if holders:
-        hold_txt = ", ".join(f"{h['handle']} (#{h['rank']}, ${h['usd']:,.0f})" for h in holders[:6])
+        hold_txt = ", ".join(f"{h['handle']} ({tag(h['rank'])}, ${h['usd']:,.0f})" for h in holders[:6])
     elif r.get("live_holders"):
-        hold_txt = "none of the top 100 (every one of their wallets was checked just now)"
+        hold_txt = "none of the top 100 or the traders you follow (every one of their wallets was checked just now)"
     else:
         hold_txt = "unknown - their wallets could not be read this run, so treat the score as less certain"
     if r.get("exited"):

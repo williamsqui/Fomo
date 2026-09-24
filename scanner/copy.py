@@ -30,8 +30,6 @@ from .tracker import trade_pnl
 
 log = logging.getLogger("copy")
 
-TOKEN_PROGRAMS = ["TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-                  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"]
 BLOCKSCOUT = {"base": "https://base.blockscout.com",
               "robinhood": "https://robinhoodchain.blockscout.com"}
 GREW, SHRANK = 1.05, 0.5
@@ -88,6 +86,10 @@ def wallets(s):
             b["wallets"] = {"solana": t.get("wallet"), "evm": t.get("evm")}
             log.info("copy: %s wallets from the leaderboard", handle)
             return b["wallets"]
+    f = (s.get("followed") or {}).get(handle)                         # already looked up as a followed trader
+    if f and (f.get("wallet") or f.get("evm")):
+        b["wallets"] = {"solana": f.get("wallet"), "evm": f.get("evm")}
+        return b["wallets"]
     from .fomo import _get                                            # 2,500 credits, once
     d = _get(s, f"/v2/users/{handle}", 2500)
     w = ((d or {}).get("user") or d or {}).get("wallets") or {}
@@ -99,21 +101,14 @@ def wallets(s):
 
 # ------------------------------------------------------------------ what they hold now
 def solana_holdings(s, w):
-    res = solana._rpc(s, [("getTokenAccountsByOwner", [w, {"programId": p}, {"encoding": "jsonParsed"}])
-                          for p in TOKEN_PROGRAMS])
-    if res is None or all(r is None for r in res):
+    sn = (s.get("wallet_snap") or {}).get(w)
+    if sn and time.time() - sn["ts"] < 120:           # the scanner read this wallet a moment ago
+        bal = sn["bal"]
+    else:
+        bal = solana.read_holdings(s, [w]).get(w)
+    if bal is None:
         return None
-    out = {}
-    for r in res:
-        for acc in ((r or {}).get("value") or []):
-            try:
-                info = acc["account"]["data"]["parsed"]["info"]
-                amt = float(info["tokenAmount"]["uiAmount"] or 0)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if amt > 0 and not _skip("solana", info["mint"]):
-                out[chains.key("solana", info["mint"])] = amt
-    return out
+    return {chains.key("solana", m): a for m, a in bal.items() if not _skip("solana", m)}
 
 
 def evm_holdings(chain, w):

@@ -16,6 +16,8 @@ investable = {"solana:GRNDx111111111111111111111111111111111pump", "base:0x11111
               "bsc:0x4444444444444444444444444444444444444444", "solana:DUMPx333333333333333333333333333333333pump",
               "base:0x5555555555555555555555555555555555555555"}
 assert investable <= checked, investable - checked
-sol = s["holdings"].get("solana:GRNDx111111111111111111111111111111111pump")
-assert sol and len(sol["bal"]) == 4, sol
-print(f"all {len(investable)} investable coins fully checked within 7 scans (2 refreshes each); GRIND top-holder snapshot: {len(sol['bal'])} traders")
+from scanner import holders, fomo  # noqa: E402
+ctx = holders.context(s, fomo.leaderboard(s))
+sol = ctx["sol"].get("solana:GRNDx111111111111111111111111111111111pump") or {}
+assert len(sol) == 4, sol
+print(f"all {len(investable)} investable coins fully checked within 7 scans (2 refreshes each); GRIND held by {len(sol)} top traders (full wallet reads)")

@@ -1,7 +1,10 @@
 """One scan (runs every 10 minutes).
 
-leaderboard -> trader wallets (Solana + Base/BNB/Robinhood) -> candidate coins
--> investable filter ($500k+ mcap, liquidity, age) -> quick score
+leaderboard -> what each trader's wallet holds now vs last scan (Solana) / their transfers +
+holdings snapshots (Base/BNB/Robinhood) -> candidate coins (fresh buys, trending, and every
+coin top traders are still in) -> investable filter ($500k+ mcap, liquidity, age - 4h instead
+of 12h when 2+ top traders hold it) -> quick score (current holders always count; trims are
+not exits; old bags count half)
 -> deep check of finalists (chart, rug check, holders, X, Telegram, FOMO posts; cached per coin)
 -> keep only coins I'd actually buy
 -> 80+  : re-check the live price and signal age, then email immediately
@@ -17,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import (chains, chart, config, dex, evm, fomo, report, safety, scoring, sizing, socials,
+from . import (chains, chart, config, dex, evm, fomo, holders, report, safety, scoring, sizing, socials,
                solana, state as st, tracker, traders as reputation, watchlist, xsocial, learn, copy)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
@@ -72,7 +75,7 @@ def price_at(closes, ts):
     return before[-1] if before else None
 
 
-def verify_live(picks, scan_prices):
+def verify_live(picks, scan_prices, s=None):
     """Re-pull prices right before emailing. Drop anything that ran too far or is dumping."""
     live = dex.tokens([p["key"] for p in picks])
     ok, dropped = [], []
@@ -84,17 +87,41 @@ def verify_live(picks, scan_prices):
         p["market"] = m
         p["checked_at"] = time.time()
         drop = (1 - m["price"] / scan_prices[p["key"]]) * 100 if scan_prices.get(p["key"]) else 0
-        base = price_at((p.get("chart") or {}).get("closes"), p["smart"].get("first_buy"))
+        # price when the top traders got in: their first buy in the last 6h, else the earliest
+        # buy we logged for the traders still holding (up to 48h back)
+        base = price_at((p.get("chart") or {}).get("closes"), p["smart"].get("first_buy") or p.get("entry_ts"))
         p["runup"] = (m["price"] / base - 1) * 100 if base else None
+        h6 = (m.get("change") or {}).get("h6")
         if drop > config.MAX_DROP_SINCE_SCAN_PCT:
             dropped.append((p, f"fell {drop:.0f}% while being checked"))
         elif p["runup"] is not None and p["runup"] > config.MAX_RUNUP_PCT:
             dropped.append((p, f"already +{p['runup']:.0f}% since the top traders bought - too late"))
+        elif p["runup"] is None and h6 is not None and h6 > config.RUNUP_H6_MAX:
+            # holders only, no buy time known: don't chase a coin that just ran
+            dropped.append((p, f"already +{h6:.0f}% in the last 6h - too late"))
+        elif s is not None and (leaving := still_in(s, p)):
+            dropped.append((p, leaving))
         else:
             ok.append(p)
     for p, why in dropped:
         log.info("dropped %s: %s", p["market"]["symbol"], why)
     return ok, dropped
+
+
+def still_in(s, p):
+    """Re-read the holders' wallets live seconds before emailing (Solana, a few credits).
+    Returns a reason to drop the pick if most of them just left, else ''."""
+    ws = p.get("holder_wallets") or []
+    if not ws or not p["key"].startswith("solana:"):
+        return ""
+    from .check import solana_holders
+    live, complete = solana_holders(s, chains.split(p["key"])[1], [{"wallet": w} for w in ws])
+    if not complete:
+        return ""
+    left = sum(1 for w in ws if live.get(w, 0) > 0)
+    if left * 2 < len(ws):
+        return f"only {left} of the {len(ws)} top traders who held it still do (checked live) - they're leaving"
+    return ""
 
 
 def run():
@@ -110,33 +137,59 @@ def run():
         report.send(*watchlist.build_added_email(added))
     learn.update(s)               # what the paper trades have taught (refreshed every 6h)
 
-    # 1. leaderboard + wallets (top 50 every run, the rest every 3rd run)
-    traders = fomo.leaderboard(s)
+    # 1. leaderboard + followed traders (top 50 and followed every run, the rest every 3rd run)
+    traders = fomo.tracked(s)             # the top 100 + the traders you follow
     handles = [t["handle"] for t in traders]
     every = s["run_count"] % config.SLOW_WALLET_EVERY == 0
-    scan_traders = [t for t in traders if every or t["rank"] <= config.FAST_WALLETS]
+    scan_traders = [t for t in traders if every or t["rank"] <= config.FAST_WALLETS or t.get("followed")]
 
     # 2. what they traded since the last scan
     if "solana" in config.CHAINS and config.HELIUS_API_KEY:
-        solana.scan_wallets(s, scan_traders, dex.sol_price())
+        solana.scan_wallets(s, scan_traders)          # full holdings of each wallet, diffed
+        live = {t["wallet"] for t in traders if t.get("wallet")}
+        s["wallet_snap"] = {w: v for w, v in (s.get("wallet_snap") or {}).items() if w in live}
     evm.scan_wallets(s, traders)
+    ctx = holders.context(s, traders)
     cutoff = now - config.LOOKBACK_HOURS * 3600
     recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
     new_buy_keys = {e["key"] for e in recent if e["side"] == "buy" and e["ts"] >= now - 20 * 60}
+    # wallet-diff changes still waiting for a price (this scan's, or a DexScreener hiccup earlier)
+    unpriced = [e for e in s["trader_buys"] if e.get("src") == "snap" and e.get("usd") is None]
 
-    # 3. candidates
+    # 3. candidates: fresh buys, trending, and every coin top traders are still IN
     trending = {t["key"]: t["rank"] for t in fomo.trending(s) if "key" in t}
     gt_trend = [k for c in config.CHAINS for k in chart.trending_tokens(s, c)]
-    cands = list(dict.fromkeys([e["key"] for e in recent if e["side"] == "buy"] + list(trending) + gt_trend))
+    held_keys = holders.candidate_keys(s, ctx, now)
+    cands = list(dict.fromkeys([e["key"] for e in recent if e["side"] == "buy"] + list(trending) + gt_trend
+                               + held_keys))
     cands = [k for k in cands if chains.split(k)[1] not in chains.QUOTE_ADDRESSES]
     watch = [p["key"] for p in s["picks"] if p.get("sent") and now - p["sent_ts"] < config.TRACK_WINDOW_HOURS * 3600]
-    markets = dex.tokens(list(dict.fromkeys(cands + tracker.open_keys(s) + watch + watchlist.keys(s))))
-    for e in s["trader_buys"]:  # EVM transfers only have token amounts - price them
+    markets = dex.tokens(list(dict.fromkeys(cands + tracker.open_keys(s) + watch + watchlist.keys(s)
+                                            + [e["key"] for e in unpriced])))
+    failed = set(dex.FAILED)           # lookups that errored: unknown, NOT "not listed"
+    for e in s["trader_buys"]:  # holdings diffs / EVM transfers only have token amounts - price them
         if e.get("usd") is None and e["key"] in markets:
             e["usd"] = round(e["amount"] * markets[e["key"]]["price"], 2)
+    # wallet-diff changes on coins nobody can trade (spam airdrops, dust) are not trades. If the
+    # lookup itself failed, keep the change and price it next scan (give up after 6h).
+    def junk(e):
+        if e["key"] in failed and now - e.get("seen", e["ts"]) < 6 * 3600:
+            return False
+        m = markets.get(e["key"])
+        return not m or (e["usd"] or 0) < evm.MIN_EVENT_USD or m["liquidity"] < 10_000
+    bad = {id(e) for e in unpriced if junk(e)}
+    s["trader_buys"] = [e for e in s["trader_buys"] if id(e) not in bad]
+    for k in held_keys:                # unlisted / untradeable: stop looking it up for a while
+        if k in failed:
+            continue
+        if k not in markets:
+            s["dex_skip"][k] = now + 6 * 3600
+        elif markets[k]["liquidity"] < 10_000:
+            s["dex_skip"][k] = now + 24 * 3600
     # 3b. Base/BNB/Robinhood: check what the top traders hold right now (works on free RPCs)
-    investable = {k: m for k, m in markets.items() if k in cands and scoring.eligible(m)}
+    investable = {k: m for k, m in markets.items() if k in cands and scoring.eligible(m, config.EARLY_MIN_HOLDERS)}
     evm.holdings_scan(s, traders, investable)
+    ctx = holders.context(s, traders)
     recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
     new_buy_keys = {e["key"] for e in recent if e["side"] == "buy" and e["ts"] >= now - 20 * 60}
     tracker.update(s, markets)
@@ -151,20 +204,26 @@ def run():
         report.send(*watchlist.build_email(watched))
 
     # 4. investable filter + quick score (trades in the last 6h + what top traders hold right now)
-    by_sol = {t["wallet"]: t for t in traders if t.get("wallet")}
-    by_evm = {t["evm"]: t for t in traders if t.get("evm")}
-
     def events_for(k, m):
-        by = by_sol if m["chain"] == "solana" else by_evm
-        ev = [e for e in s["trader_buys"] if e["key"] == k]
-        # current holders always count (scoring never double-counts their $), however long
-        # ago they bought - otherwise a buy older than the 6h lookback vanishes from the score
-        return ev + evm.holding_events(s, k, m["price"], by)
+        # the same truth "Check my position" uses: a trader whose wallet (read after their buy)
+        # holds none of it now has left, whatever we logged; everyone holding it counts, however
+        # long ago they bought; and a seller who still holds is a trim, not an exit
+        ev = holders.drop_exited(s, k, [e for e in s["trader_buys"] if e["key"] == k])
+        return ev + holders.held_events(s, ctx, k, m["price"])
+
+    def entry_ts(k, sm):
+        """Earliest buy we logged (48h) for the traders in it now - for the too-late check."""
+        ts = [e["ts"] for e in s["trader_buys"] if e["key"] == k and e["side"] == "buy"
+              and not e.get("held") and e["handle"] in sm["buyers"]]
+        return min(ts) if ts else None
 
     quick = {}
     for k in cands:
         m = markets.get(k)
-        if not scoring.eligible(m) or m["symbol"].upper() in chains.QUOTE_SYMBOLS:
+        if not m or m["symbol"].upper() in chains.QUOTE_SYMBOLS:
+            continue
+        n_in = len(holders.held_events(s, ctx, k, m["price"]))
+        if not scoring.eligible(m, n_in):
             continue
         sm = scoring.smart_money(events_for(k, m), k, reputation.fn(s))
         quick[k] = (m, sm, scoring.score(m, sm, trending_rank=trending.get(k)))
@@ -201,8 +260,6 @@ def run():
         x = th = tg = None
         if sf["ok"]:  # don't spend rate limits / credits on coins that already failed safety
             if fetch:
-                if m["chain"] == "solana" and config.HELIUS_API_KEY:
-                    solana.holdings_snapshot(s, m, by_sol)
                 ch, _ = cached(s, k, "chart", config.CHART_TTL_MIN,
                                lambda: chart.analyze(chart.candles(m["chain"], m["pair"])) if m["pair"] else None,
                                force=fresh_signal)
@@ -224,6 +281,8 @@ def run():
         sm = scoring.smart_money(events_for(k, m), k, reputation.fn(s))
         r = scoring.score(m, sm, x=x, thesis=th, trending_rank=trending.get(k), chart=ch, safety=sf,
                           info=info, tg=tg, holder_growth=growth, deep=True)
+        r["entry_ts"] = entry_ts(k, sm)
+        r["holder_wallets"] = holders.wallets(s, ctx, k, m["price"])
         learn.gate(s, r)          # stricter bar where paper trades keep losing
         deep.append(r)
         log.info("%3d %-6s %-9s %-8s %s", r["score"], r["tier"], m["chain"], m["symbol"],
@@ -238,7 +297,7 @@ def run():
         by_chain.setdefault(chains.split(k)[0], [0, 0])[0] += 1
     for k in quick:
         by_chain[chains.split(k)[0]][1] += 1
-    stats = {"traders": len(traders), "events": len(recent), "candidates": len(cands),
+    stats = {"traders": len(traders), "events": len(recent), "candidates": len(cands), "held": len(held_keys),
              "eligible": len(quick), "deep": len(deep), "fresh": len(fetch_set), "by_chain": by_chain}
     log.info("coins seen/investable by chain: %s", by_chain)
     os.makedirs("out", exist_ok=True)
@@ -251,7 +310,7 @@ def run():
            and (r["smart"].get("last_buy") is None
                 or now - r["smart"]["last_buy"] <= config.INSTANT_SIGNAL_MAX_AGE_MIN * 60)]
     if hot:
-        hot, _ = verify_live(hot[:config.MAX_PICKS], scan_prices)
+        hot, _ = verify_live(hot[:config.MAX_PICKS], scan_prices, s)
         if hot:
             hot = sizing.plan(hot)
             subject, body = report.build(hot, summ, hits, s, stats, set(), instant=True)
@@ -267,7 +326,7 @@ def run():
     # 6b. digest at 8:00 / 18:00: everything that still qualifies, re-verified live
     digest = due_digest(s)
     if digest:
-        picks, dropped = verify_live(qualified[:config.MAX_PICKS + 2], scan_prices) if qualified else ([], [])
+        picks, dropped = verify_live(qualified[:config.MAX_PICKS + 2], scan_prices, s) if qualified else ([], [])
         picks = sizing.plan(picks[:config.MAX_PICKS])
         if picks:
             subject, body = report.build(picks, summ, hits, s, stats,

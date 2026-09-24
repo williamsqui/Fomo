@@ -7,6 +7,7 @@ from .http import request
 
 log = logging.getLogger("dex")
 SOL_MINT = "So11111111111111111111111111111111111111112"
+FAILED = set()      # keys whose lookup request failed in the last tokens() call
 
 
 def tokens(keys):
@@ -16,11 +17,13 @@ def tokens(keys):
         c, a = chains.split(k)
         by_chain.setdefault(c, []).append(a)
     out = {}
+    FAILED.clear()
     for chain, addrs in by_chain.items():
         for i in range(0, len(addrs), 30):
             chunk = addrs[i:i + 30]
             r = request("GET", f"{config.DEX_BASE}/tokens/v1/{chains.CHAIN[chain]['dex']}/{','.join(chunk)}")
             if r is None:
+                FAILED.update(chains.key(chain, a) for a in chunk)   # unknown, not "unlisted"
                 continue
             pairs = r.json()
             if isinstance(pairs, dict):

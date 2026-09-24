@@ -17,6 +17,7 @@ import math
 import time
 
 from . import config
+from .traders import rank_weight, tag
 
 MAX = {"smart": 30, "chart": 20, "momentum": 10, "setup": 15, "social": 20, "community": 5}
 SEVERE = ("chasing", "botted", "sold:", "downtrend", "from its 7-day high", "overextended", "distribution",
@@ -44,9 +45,18 @@ def smart_money(events, key, trust=None):
     # seller = sold >= 80% of what they bought in the window (or sold with no buy seen)...
     # ...unless a live read shows they still hold a real position: that's a trim, not an exit.
     # (Before this, a whale trimming 10% of a $129k bag was scored as "selling".)
-    net_sellers = {h for h in sellers
-                   if h not in holding and amt(sellers[h]) >= 0.8 * amt(buyers.get(h, []))}
-    trimmed = sorted(h for h in sellers if h in holding)
+    # A wallet-diff sell that left them with 20%+ of their bag is marked out=False: a trim even
+    # if their latest wallet read is missing (a failed read must never turn a trim into an exit).
+    def trim_only_(xs):
+        if not all(x.get("out") is False for x in xs):
+            return False
+        last = max(xs, key=lambda x: x["ts"])        # several trims down to dust = an exit
+        px = (last.get("usd") or 0) / last["amount"] if last.get("amount") else 0
+        return not px or (last.get("left") or 0) * px >= 20
+    trim_only = {h for h, xs in sellers.items() if trim_only_(xs)}
+    net_sellers = {h for h in sellers if h not in holding and h not in trim_only
+                   and amt(sellers[h]) >= 0.8 * amt(buyers.get(h, []))}
+    trimmed = sorted(h for h in sellers if h in holding or h in trim_only)
     active = {h: v for h, v in buyers.items() if h not in net_sellers}
     return {
         "buyers": sorted(active, key=lambda h: active[h][0]["rank"]),
@@ -56,22 +66,38 @@ def smart_money(events, key, trust=None):
         "buy_usd": round(sum(usd(v) for v in active.values())),
         # "held when first seen" snapshots have no real buy time, so they don't set these
         "first_buy": min((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
-        "last_buy": max((x["ts"] for v in active.values() for x in v if not x.get("held")), default=None),
+        # (a buy found only after a gap in wallet reads can't count as a fresh signal)
+        "last_buy": max((x["ts"] for v in active.values() for x in v if not x.get("held") and not x.get("gap")),
+                        default=None),
         # a proven regular's buy counts for more than a trader who appeared last week
-        "weight": sum((1 + (101 - v[0]["rank"]) / 100) * trust(h) for h, v in active.items()),
+        # an old bag (held, but no buy logged in 48h) counts half: it may be stuck, not conviction
+        "weight": sum(rank_weight(v[0]["rank"]) * trust(h)
+                      * (0.5 if all(x.get("stale") for x in v) else 1.0) for h, v in active.items()),
+        "old_bags": sorted(h for h, v in active.items() if all(x.get("stale") for x in v)),
+        "holders": sorted(h for h in active if h in holding),
         "trust": {h: round(trust(h), 2) for h in active},
     }
 
 
-def eligible(m):
-    """Cheap pre-filter on DexScreener data: 'is this even investable?'"""
-    if not m or m["price"] <= 0:
+def age_hours(m):
+    return (time.time() * 1000 - m["created_ms"]) / 3.6e6 if m.get("created_ms") else 999
+
+
+def min_age(holders=0):
+    """Coins need MIN_PAIR_AGE_HOURS - or only EARLY_PAIR_AGE_HOURS when enough top traders are in."""
+    return config.EARLY_PAIR_AGE_HOURS if holders >= config.EARLY_MIN_HOLDERS else config.MIN_PAIR_AGE_HOURS
+
+
+def eligible(m, holders=0):
+    """Cheap pre-filter on DexScreener data: 'is this even investable?'
+
+    holders = how many top-100 traders hold it right now (lets a young coin in early)."""
+    if not m or m["price"] <= 0 or not m["mcap"]:
         return False
-    age_h = (time.time() * 1000 - m["created_ms"]) / 3.6e6 if m["created_ms"] else 999
     return (config.MIN_MCAP_USD <= m["mcap"] <= config.MAX_MCAP_USD
             and m["liquidity"] >= config.MIN_LIQUIDITY_USD
             and m["liquidity"] / m["mcap"] >= config.MIN_LIQ_TO_MCAP
-            and age_h >= config.MIN_PAIR_AGE_HOURS)
+            and age_hours(m) >= min_age(holders))
 
 
 def score(m, sm, *, x=None, thesis=None, trending_rank=None, chart=None, safety=None,
@@ -88,15 +114,22 @@ def score(m, sm, *, x=None, thesis=None, trending_rank=None, chart=None, safety=
         mark = lambda h: (", proven" if tr.get(h, 1) >= config.TRUST_PROVEN
                           else ", regular" if tr.get(h, 1) >= config.TRUST_REGULAR
                           else ", new face" if tr.get(h, 1) < 1 else "")
-        who = ", ".join(f"{h} (#{sm['buyer_ranks'][h]}{mark(h)})" for h in sm["buyers"][:4])
+        who = ", ".join(f"{h} ({tag(sm['buyer_ranks'][h])}{mark(h)})" for h in sm["buyers"][:4])
         if tr and all(v < 1 for v in tr.values()):
             flags.append("the only buyers are new faces on the leaderboard (one good week, not a record)")
         mins = int((time.time() - sm["first_buy"]) / 60) if sm["first_buy"] else 0
-        reasons.append(f"{len(sm['buyers'])} top-100 FOMO trader(s) bought or hold it: {who}"
+        reasons.append(f"{len(sm['buyers'])} top-100 / followed FOMO trader(s) bought or hold it: {who}"
                        + (f" (~${sm['buy_usd']:,}" + (f", first buy {mins} min ago)" if sm["first_buy"] else ")")
                           if sm["buy_usd"] else ""))
+    if sm.get("old_bags"):
+        reasons.append(f"{len(sm['old_bags'])} of them bought 2+ days ago or earlier (counted at half weight): "
+                       + ", ".join(sm["old_bags"][:3]))
     if sm["sellers"]:
         flags.append(f"leaderboard trader(s) sold: {', '.join(sm['sellers'][:3])}")
+    age = age_hours(m)
+    if age < config.MIN_PAIR_AGE_HOURS:
+        flags.append(f"young coin: only {age:.0f}h old (let in early because "
+                     f"{len(sm.get('holders') or sm['buyers'])} top traders hold it)")
 
     # ---- chart -------------------------------------------------------------
     if chart:

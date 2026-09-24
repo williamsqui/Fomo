@@ -29,6 +29,7 @@ import uuid
 
 from . import chains, config, evm, safety
 from .sizing import fmt
+from .traders import tag
 
 log = logging.getLogger("watchlist")
 e = html.escape
@@ -193,7 +194,7 @@ def check(s, markets):
                 usd = f" (~${h['base'] * price:,.0f})" if price else ""
                 if amt < h["base"] * SOLD_OUT:
                     if h["handle"] not in warned:
-                        hit(f"out:{wal}", f"{h['handle']} (#{h['rank']}) sold out{usd}",
+                        hit(f"out:{wal}", f"{h['handle']} ({tag(h['rank'])}) sold out{usd}",
                             "The traders you followed in are leaving. Run Check my position now - "
                             "unless the others are still adding, I'd sell.")
                     if pick and h["handle"] not in warned:
@@ -201,7 +202,7 @@ def check(s, markets):
                 else:
                     left += 1
                     if amt < h["base"] * HALF:
-                        hit(f"half:{wal}", f"{h['handle']} (#{h['rank']}) sold about half their position",
+                        hit(f"half:{wal}", f"{h['handle']} ({tag(h['rank'])}) sold about half their position",
                             "Taking profit, not necessarily leaving - worth a position check.")
             it["still_in"], it["tracked"] = left, len(it["holders"])
             # (skip when the only exits were already reported by the normal exit alert)
@@ -298,7 +299,7 @@ def build_added_email(added):
     """Confirmation that a coin from Check my position really reached the scanner."""
     items = ""
     for it in added:
-        names = ", ".join(f"{h['handle']} (#{h['rank']})" for h in it["holders"].values()) or "none (no top trader holds it)"
+        names = ", ".join(f"{h['handle']} ({tag(h['rank'])})" for h in it["holders"].values()) or "none (no top trader holds it)"
         items += (f"<li style='margin:6px 0'><b>${e(it['symbol'])}</b> - following {len(it['holders'])} top trader(s): "
                   f"{e(names)}. Stop-loss {fmt(it['stop'])}, target {fmt(it['target'])}.</li>")
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
