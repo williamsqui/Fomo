@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import (chains, chart, config, dex, evm, fomo, holders, report, safety, scoring, sizing, socials,
+from . import (chains, chart, config, dex, early, evm, fomo, holders, report, safety, scoring, sizing, socials,
                solana, state as st, tracker, traders as reputation, watchlist, xsocial, learn, copy)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
@@ -132,6 +132,7 @@ def run():
     now = time.time()
     s["run_count"] += 1
     watchlist.merge_requests(s)   # coins added/removed via "Check my position"
+    watchlist.drop_auto(s)        # only coins you hold are watched (no more auto-added alerts)
     added = s.pop("_watch_added", [])
     if added:                     # proof the request really arrived
         report.send(*watchlist.build_added_email(added))
@@ -193,12 +194,29 @@ def run():
     recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
     new_buy_keys = {e["key"] for e in recent if e["side"] == "buy" and e["ts"] >= now - 20 * 60}
     tracker.update(s, markets)
-    exits = tracker.exit_checks(s, markets)
+    # follow-up emails only for coins you actually hold (added via "Check my position")
+    exits = tracker.exit_checks(s, markets, only={k for k in watchlist.keys(s) if watchlist.held(s, k)})
     if exits and config.EXIT_ALERTS:
         report.send(*report.build_exit(exits))
         log.info("Exit alerts: %s", [(p["symbol"], m) for p, m, _ in exits])
     if config.COPY_TRADER:
         copy.scan(s)                        # shadow book: paper-trade whatever one trader buys
+    # early lane (high risk): fresh launchpad coins, its own alerts + paper record
+    if config.EARLY_LANE and "solana" in config.CHAINS:
+        try:
+            e_alerts, e_papers, e_markets = early.scan(s, ctx, reputation.fn(s))
+            early.step_paper(s, e_markets)
+            for r in e_papers:
+                early.open_paper(s, r)
+            due = early.due_alerts(s, e_alerts)
+            due = early.verify(due, {r["key"]: r["market"]["price"] for r in due}) if due else []
+            if due:
+                report.send(*early.build_email(due))
+                early.mark_sent(s, due)
+                log.info("Early alert sent: %s", [r["market"]["symbol"] for r in due])
+            markets.update({k: v for k, v in e_markets.items() if k in watchlist.keys(s)})
+        except Exception:
+            log.exception("early lane failed this scan (main scan continues)")
     watched = watchlist.check(s, markets)   # coins you hold: top traders leaving, liquidity, stop/target
     if watched and config.EXIT_ALERTS:
         report.send(*watchlist.build_email(watched))
@@ -346,8 +364,6 @@ def run():
                  len(qualified), " / ".join(config.DIGEST_TIMES))
 
     tracker.log_picks(s, deep, sent)
-    for p in sent.values():              # every coin you're told to buy is watched from now on
-        watchlist.add_pick(s, p, traders)
     st.save(s)
 
 

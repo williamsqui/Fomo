@@ -1,8 +1,8 @@
 """Watchlist: keep an eye on coins you hold and email you the moment something changes.
 
 What gets watched
-  * every coin the scanner emails you as a pick (automatically, from the moment it's sent)
-  * every coin you run "Check my position" on
+  * only coins you run "Check my position" on - i.e. coins you actually bought. Alert emails
+    no longer add their coins automatically (most of them you never buy, so it was just noise).
   for WATCH_DAYS days, or until you run "Check my position" with the gain box set to "sold".
 
 What triggers an email (each reason only once per coin)
@@ -108,17 +108,19 @@ def _entry(m, source, entry, stop=None, target=None, holders=None, lp_top=None):
             "alerted": []}
 
 
-def add_pick(s, r, traders):
-    """Called by the scanner for every coin it emails you."""
-    m, w = r["market"], s.setdefault("watch", {})
-    if m["key"] in w:
-        return
-    field = "wallet" if m["chain"] == "solana" else "evm"
-    by_handle = {t["handle"]: t for t in traders if t.get(field)}
-    holders = {by_handle[h][field]: {"handle": h, "rank": by_handle[h]["rank"], "base": None}
-               for h in r["smart"]["buyers"] if h in by_handle}
-    w[m["key"]] = _entry(m, "pick", entry=m["price"], stop=r.get("stop_price"), target=r.get("target_price"),
-                         holders=holders)
+def held(s, key):
+    """True if you told the scanner you hold this coin (via Check my position)."""
+    it = (s.get("watch") or {}).get(key)
+    return bool(it) and it.get("source") == "manual"
+
+
+def drop_auto(s):
+    """Remove coins that were auto-added from alert emails (the old behaviour). Yours stay."""
+    w = s.get("watch") or {}
+    gone = [k for k, it in w.items() if it.get("source") != "manual"]
+    for k in gone:
+        w.pop(k)
+    return gone
 
 
 def keys(s):
@@ -230,13 +232,24 @@ def check(s, markets):
                 "Liquidity leaving is how rugs start, and it makes selling cost more. I'd sell.")
 
         # 4. stop / target (picks: the normal exit alert covers the first 48h)
+        if price:
+            it["high"] = max(it.get("high") or it["entry"], price)
         if price and not pick:
+            tgt_pct = (it["target"] / it["entry"] - 1) * 100 if it.get("entry") else config.TARGET_GAIN_PCT
+            early_rules = tgt_pct >= 99          # early-lane exits: half at +100%, then a trailing stop
             if price <= it["stop"]:
                 hit("stop", f"hit your stop-loss ({fmt(price)}, {(price / it['entry'] - 1) * 100:+.0f}% from entry)",
                     "Sell to protect your bankroll.")
+            elif (early_rules and "target" in it["alerted"]
+                  and price <= it["high"] * (1 - config.EARLY_TRAIL_PCT / 100)):
+                hit("trail", f"fell {config.EARLY_TRAIL_PCT:.0f}% from its high of {fmt(it['high'])} after hitting "
+                             f"your target (now {fmt(price)})",
+                    "Sell the rest now - that's the exit rule, and you've already banked the first half.")
             elif price >= it["target"]:
-                hit("target", f"hit your +{config.TARGET_GAIN_PCT:.0f}% target ({fmt(price)})",
-                    "Take profit - all of it if your position is under $60.")
+                hit("target", f"hit your +{tgt_pct:.0f}% target ({fmt(price)})",
+                    (f"Sell half now - that gets your money back. Sell the rest if it falls "
+                     f"{config.EARLY_TRAIL_PCT:.0f}% from its high; I'll email you when it does.") if early_rules
+                    else "Take profit - all of it if your position is under $60.")
         if price:
             it["last_price"] = price
         if found:
@@ -277,7 +290,7 @@ def status(s):
     for it in (s.get("watch") or {}).values():
         ago = int((now - it["checked"]) / 60) if it.get("checked") else None
         price = it.get("last_price")
-        rows.append({"symbol": it["symbol"], "source": "you" if it["source"] == "manual" else "scanner pick",
+        rows.append({"symbol": it["symbol"], "source": {"manual": "you", "early": "early alert"}.get(it["source"], "scanner pick"),
                      "ago": ago, "ok": it.get("read_ok"), "still_in": it.get("still_in"),
                      "tracked": it.get("tracked", len(it.get("holders") or {})),
                      "chg": (price / it["entry"] - 1) * 100 if price and it.get("entry") else None,

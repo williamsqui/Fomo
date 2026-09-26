@@ -71,11 +71,13 @@ def _sent_fields(r, price):
             "buyers": list(r["smart"]["buyers"]), "warned": []}
 
 
-def exit_checks(s, markets):
+def exit_checks(s, markets, only=None):
     """Warnings for coins we emailed: target hit, stop hit, or the smart money that bought is selling."""
     out = []
     for p in s["picks"]:
         if not p.get("sent") or time.time() - p["sent_ts"] > config.TRACK_WINDOW_HOURS * 3600:
+            continue
+        if only is not None and p["key"] not in only:     # you didn't buy it: no follow-ups
             continue
         m = markets.get(p["key"])
         price = m["price"] if m else None
