@@ -21,7 +21,7 @@ from .traders import rank_weight, tag
 
 MAX = {"smart": 30, "chart": 20, "momentum": 10, "setup": 15, "social": 20, "community": 5}
 SEVERE = ("chasing", "botted", "sold:", "downtrend", "from its 7-day high", "overextended", "distribution",
-          "rug risk")
+          "rug risk", "copycat")
 
 
 def clamp(v, lo, hi):

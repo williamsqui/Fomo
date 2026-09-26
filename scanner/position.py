@@ -43,6 +43,21 @@ def decide(r, pnl, value=None):
 
     # ---- evidence -------------------------------------------------------
     health = r["score"]
+    # a small, fresh coin is judged by the early lane's rules (the main score's $500k+/smart-money
+    # yardstick would call almost every one of them weak)
+    from . import early as early_lane
+    a = early_lane.age_min(m)
+    is_early = bool(early_lane.launchpad(m["key"])) and a is not None and a <= config.EARLY_MAX_AGE_H * 60
+    tgt_pct = config.EARLY_TP_PCT if is_early else config.TARGET_GAIN_PCT
+    stop_pct = config.EARLY_STOP_PCT if is_early else config.STOP_LOSS_PCT
+    if is_early:
+        sf = r.get("safety") if (r.get("safety") or {}).get("verified") else None   # RugCheck down != rug
+        er = early_lane.score(m, holders=[(h, 1.0) for h in sm["buyers"]], sf=sf)
+        health = max(health, er["score"])
+        r = dict(r, hard=list(dict.fromkeys((r.get("hard") or []) + er["hard"])))
+        plus.append(f"small early-stage coin: judged by the early-lane rules (early score {er['score']}/100)")
+    for h in r.get("hard") or []:
+        minus.append(f"fails a safety check: {h}")
     verdict_txt = ch.get("verdict", "")
     if "uptrend" in verdict_txt:
         health += 8
@@ -90,27 +105,29 @@ def decide(r, pnl, value=None):
             plus.append(g)
 
     # ---- levels -----------------------------------------------------------
-    target = entry * (1 + config.TARGET_GAIN_PCT / 100) if entry else price * 1.5
+    target = entry * (1 + tgt_pct / 100) if entry else price * (1 + tgt_pct / 100)
     support = ch.get("support")
-    stop = entry * (1 - config.STOP_LOSS_PCT / 100) if entry else price * (1 - config.STOP_LOSS_PCT / 100)
+    stop = entry * (1 - stop_pct / 100) if entry else price * (1 - stop_pct / 100)
     if support and price * 0.6 < support < price:
         stop = max(stop, support * 0.97)
     if entry and pnl >= 25:
         stop = max(stop, entry * 1.02)          # in good profit: never let it turn into a loss
-    levels = {"entry": entry, "price": price, "target": target, "stop": stop}
+    levels = {"entry": entry, "price": price, "target": target, "stop": stop, "tgt_pct": tgt_pct}
 
     # ---- rules -------------------------------------------------------------
     small = value is not None and value < 60
     if r.get("hard"):
         return SELL, "Sell - it now fails a safety check: " + "; ".join(r["hard"]), plus, minus, levels
-    if pnl is not None and pnl <= -config.STOP_LOSS_PCT:
-        return (SELL, f"Sell - you're past your -{config.STOP_LOSS_PCT:.0f}% stop-loss. "
+    if pnl is not None and pnl <= -stop_pct:
+        return (SELL, f"Sell - you're past your -{stop_pct:.0f}% stop-loss. "
                 "Cutting here protects the rest of your bankroll.", plus, minus, levels)
-    if pnl is not None and pnl >= config.TARGET_GAIN_PCT:
-        if health >= 70 and not sm["sellers"] and not small:
-            return (TAKE, f"Take profit on half - you hit +{config.TARGET_GAIN_PCT:.0f}%. Setup is still strong, "
-                    "so let the other half run with your stop at break-even.", plus, minus, levels)
-        return (TAKE, f"Take profit - you hit your +{config.TARGET_GAIN_PCT:.0f}% target"
+    if pnl is not None and pnl >= tgt_pct:
+        if (health >= 70 or is_early) and not sm["sellers"] and not small:
+            trail = (f"sell the rest if it drops {config.EARLY_TRAIL_PCT:.0f}% from its high" if is_early
+                     else "let the other half run with your stop at break-even")
+            return (TAKE, f"Take profit on half - you hit +{tgt_pct:.0f}%. That gets your money back; "
+                    f"{trail}.", plus, minus, levels)
+        return (TAKE, f"Take profit - you hit your +{tgt_pct:.0f}% target"
                 + (" and the setup is weakening." if health < 70 or sm["sellers"] else ".")
                 + (" Your position is small, so sell it all rather than paying fees twice." if small else ""),
                 plus, minus, levels)
@@ -137,7 +154,7 @@ def build_email(r, holders, pnl, value, verdict, headline, plus, minus, levels):
     rows = "".join(f"<tr><td>{k}</td><td>{fmt(v)}</td><td>{d}</td></tr>" for k, v, d in (
         ("Your entry (est.)", lv["entry"], ""),
         ("Price now", lv["price"], ""),
-        ("Target (+%d%%)" % config.TARGET_GAIN_PCT, lv["target"], f"{(lv['target'] / lv['price'] - 1) * 100:+.0f}% from here"),
+        ("Target (+%d%%)" % lv.get("tgt_pct", config.TARGET_GAIN_PCT), lv["target"], f"{(lv['target'] / lv['price'] - 1) * 100:+.0f}% from here"),
         ("Stop-loss", lv["stop"], f"{(lv['stop'] / lv['price'] - 1) * 100:+.0f}% from here"),
     ) if v)
     fee = ""

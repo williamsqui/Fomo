@@ -118,9 +118,10 @@ STOP_LOSS_PCT = _float("STOP_LOSS_PCT", 30)
 
 # ---- Free-tier budgets -------------------------------------------------------
 FOMO_MONTHLY_CREDITS = _int("FOMO_MONTHLY_CREDITS", 250_000)
-LEADERBOARD_REFRESH_HOURS = _int("LEADERBOARD_REFRESH_HOURS", 6)
-TRENDING_REFRESH_HOURS = _int("TRENDING_REFRESH_HOURS", 2)
-THESIS_TOKENS_PER_DAY = _int("THESIS_TOKENS_PER_DAY", 2)
+# (FOMO credits: leaderboard ~15k + trending ~60k + thesis ~38k + graduated board ~90k a month)
+LEADERBOARD_REFRESH_HOURS = _int("LEADERBOARD_REFRESH_HOURS", 12)
+TRENDING_REFRESH_HOURS = _int("TRENDING_REFRESH_HOURS", 3)
+THESIS_TOKENS_PER_DAY = _int("THESIS_TOKENS_PER_DAY", 1)
 HELIUS_MONTHLY_CREDITS = _int("HELIUS_MONTHLY_CREDITS", 1_000_000)
 HELIUS_RPS = _float("HELIUS_RPS", 8)           # free plan allows 10 requests/second (each batched call counts)
 HELIUS_BATCH = _int("HELIUS_BATCH", 10)        # max calls per batch request
@@ -161,6 +162,31 @@ COPY_SIZE_USD = _float("COPY_SIZE_USD", 30)
 COPY_MAX_DAYS = _float("COPY_MAX_DAYS", 7)             # give up if they never sell
 COPY_SOLANA_WALLET = os.getenv("COPY_SOLANA_WALLET", "")   # optional: skip the lookup
 COPY_EVM_WALLET = os.getenv("COPY_EVM_WALLET", "")
+
+# ---- Early lane (HIGH RISK): coins fresh off a launchpad, before the big move ----------
+# A separate strategy with its own rules, alerts and paper-trading record. It does NOT use the
+# $500k+ / smart-money rules above - it looks for momentum + community + safety on small coins.
+EARLY_LANE = (os.getenv("EARLY_LANE") or "1") not in ("0", "false", "no")
+EARLY_SIZE_USD = _float("EARLY_SIZE_USD", 20)
+EARLY_MIN_MCAP = _float("EARLY_MIN_MCAP", 40_000)
+EARLY_MAX_MCAP = _float("EARLY_MAX_MCAP", 1_500_000)
+EARLY_MIN_LIQ = _float("EARLY_MIN_LIQ", 15_000)
+EARLY_MIN_AGE_MIN = _int("EARLY_MIN_AGE_MIN", 20)       # skip the first sniper minutes
+EARLY_MAX_AGE_H = _float("EARLY_MAX_AGE_H", 72)
+EARLY_MAX_H1 = _float("EARLY_MAX_H1", 250)              # already +250% this hour = too late
+EARLY_ALERT_SCORE = _int("EARLY_ALERT_SCORE", 60)
+EARLY_PAPER_SCORE = _int("EARLY_PAPER_SCORE", 50)       # paper-trade a wider net to learn the right bar
+EARLY_MAX_ALERTS_PER_DAY = _int("EARLY_MAX_ALERTS_PER_DAY", 6)
+EARLY_TP_PCT = _float("EARLY_TP_PCT", 100)              # sell half here...
+EARLY_TRAIL_PCT = _float("EARLY_TRAIL_PCT", 30)         # ...then sell the rest 30% below its high
+EARLY_STOP_PCT = _float("EARLY_STOP_PCT", 35)
+EARLY_MAX_HOURS = _float("EARLY_MAX_HOURS", 24)
+EARLY_SLIPPAGE_PCT = _float("EARLY_SLIPPAGE_PCT", 2)    # thin pools: assume 2% each way
+EARLY_WATCH_HOURS = _float("EARLY_WATCH_HOURS", 48)
+EARLY_MAX_WATCH = _int("EARLY_MAX_WATCH", 300)
+EARLY_FINALISTS = _int("EARLY_FINALISTS", 4)            # RugCheck + holder count per scan
+EARLY_GRAD_REFRESH_MIN = _int("EARLY_GRAD_REFRESH_MIN", 120)   # FOMO graduated board (250 credits)
+EARLY_LAUNCHPADS = _list("EARLY_LAUNCHPADS", "pump,bonk,BAGS")  # mint endings: pump.fun, Bonk.fun, Bags
 
 STATE_DIR = os.getenv("STATE_DIR", "state")
 

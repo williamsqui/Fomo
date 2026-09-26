@@ -9,7 +9,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote
 
-from . import chains, config, copy as copybook, tracker, traders as reputation, watchlist
+from . import chains, config, copy as copybook, early as early_lane, tracker, traders as reputation, watchlist
 from .sizing import fmt
 from .traders import tag
 
@@ -210,7 +210,7 @@ def build(picks, summ, hits, s, stats, alerts, instant=False):
     body = f"""<html><body style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:auto;padding:8px;color:#111">
 <h2 style="margin:4px 0">{"High-confidence alert" if instant else "Digest"}: {funded} pick{'s' if funded != 1 else ''} to buy now{f" + {len(picks) - funded} alternate" if len(picks) > funded else ""}</h2>
 <p style="color:#555;font-size:13px;margin:0 0 12px">{f"Scored {config.INSTANT_SCORE}+ with top-trader buying in the last {config.INSTANT_SIGNAL_MAX_AGE_MIN} min. Price re-checked seconds before sending. Sizes assume your full bankroll is free - scale down if you already hold other picks." if instant else f"Ranked by confidence of reaching +{config.TARGET_GAIN_PCT:.0f}%. Every coin passed the safety checks, cleared {config.MIN_SEND_SCORE}/100, and had its price re-checked right before sending. Fewer than 3 means the rest weren't good enough."}</p>
-{cards}{watch_table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
+{cards}{watch_table(s)}{early_lane.table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
     return subject, body
 
 
@@ -262,7 +262,7 @@ def build_status(summ, hits, s, stats, near, dropped=()):
 <h2 style="margin:4px 0">No picks right now - scanner is running</h2>
 <p style="font-size:14px">Nothing currently meets the {config.MIN_SEND_SCORE}/100 bar. Sitting out is a valid trade.
 Closest calls below - copy an address into <b>Check a coin</b> for the full breakdown.</p>
-{near_html}{skipped}{watch_table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
+{near_html}{skipped}{watch_table(s)}{early_lane.table(s)}{copy_table(s)}{track_table(summ, hits)}{footer(s, stats)}</body></html>"""
     return f"FOMO digest {now}: no qualifying picks", body
 
 

@@ -31,11 +31,16 @@ def _rugcheck(mint):
     for risk in d.get("risks") or []:
         name, level = risk.get("name", ""), risk.get("level", "")
         low = name.lower()
-        if level == "danger" or any(w in low for w in ("mint authority", "freeze authority", "copycat")):
+        if "copycat" in low and level != "danger":
+            # same ticker as a verified coin - a buyer-confusion warning, not a rug. It used to be an
+            # automatic reject, which is why $NPC (+300%) was never even scored.
+            out["flags"].append("copycat ticker (another verified coin uses this symbol)")
+        elif level == "danger" or any(w in low for w in ("mint authority", "freeze authority")):
             out["hard"].append(name)
         elif level == "warn":
             out["flags"].append(name)
     lp = d.get("lpLockedPct")
+    out["lp_locked"] = float(lp) if lp is not None else None
     if lp is not None and float(lp) >= 90:
         out["good"].append(f"LP {float(lp):.0f}% locked/burned")
     elif lp is not None and float(lp) < 50 and "pump" not in mint.lower():

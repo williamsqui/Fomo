@@ -88,7 +88,7 @@ def followed(s):
         if cw.get("solana") or cw.get("evm"):
             cache[n] = {"handle": h, "wallet": cw.get("solana"), "evm": cw.get("evm"), "ts": time.time()}
             continue
-        if looked >= 3 or (c and time.time() - c.get("tried", 0) < 6 * 3600):
+        if looked >= 3 or (c and time.time() - c.get("tried", 0) < 48 * 3600):   # 2,500 credits a try
             continue
         looked += 1
         d = _get(s, f"/v2/users/{h.lstrip('@')}", 2500)
@@ -143,6 +143,27 @@ def trending(s):
                                 "holders": t.get("holders")})
             s["trending"] = {"ts": time.time(), "tokens": out}
     return s["trending"]["tokens"]
+
+
+def graduated(s):
+    """FOMO's graduated-token board (the app's "Graduated" section): [{key, rank, holders, mcap}].
+    250 credits, refreshed every EARLY_GRAD_REFRESH_MIN."""
+    g = s.setdefault("graduated", {"ts": 0, "tokens": []})
+    if time.time() - g["ts"] > config.EARLY_GRAD_REFRESH_MIN * 60:
+        data = _get(s, "/v2/leaderboard/tokens/graduated", 250, {"limit": 100})
+        g["ts"] = time.time()           # even on failure: don't retry every scan
+        toks = (data or {}).get("tokens") if isinstance(data, dict) else data
+        if toks:
+            out = []
+            for t in toks:
+                net = t.get("network") or (t.get("token") or {}).get("network") or "solana"
+                chain = chains.FOMO_NET.get(str(net).lower().strip())
+                addr = (t.get("token") or {}).get("address")
+                if chain in config.CHAINS and addr:
+                    out.append({"key": chains.key(chain, addr), "rank": t.get("rank"),
+                                "holders": t.get("holders"), "mcap": t.get("marketCapUsd")})
+            g["tokens"] = out
+    return g["tokens"]
 
 
 def thesis(s, key):

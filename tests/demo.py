@@ -33,6 +33,10 @@ COINS = {
     "solana:DUMPx333333333333333333333333333333333pump": ("DUMP", 0.0009, 900_000, 90_000, -8, 150, 400, "down", 1, "clean", 400),
     "base:0x5555555555555555555555555555555555555555": ("DROP", 0.001, 1_000_000, 100_000, 2, 100, 100, "up_break", 0, "clean", 0),
 }
+# early-lane coin: graduated from pump.fun 14h ago, $300k, pumping with a community (like $NPC)
+EARLY = "solana:NPCSx444444444444444444444444444444444pump"
+COINS[EARLY] = ("NPCS", 0.0003, 300_000, 45_000, 60, 900, 480, "up_break", 0, "clean", 2500)
+AGE_H = {EARLY: 14}
 TRADERS = [{"rank": i + 1, "handle": f"trader{i + 1}", "pnlUsd": 200_000 - i * 1500,
             "wallets": {"solana": f"W{i + 1:03d}" + "x" * 40, "evm": "0x" + f"{i + 1:040x}"}}
            for i in range(100)]
@@ -86,6 +90,11 @@ def evm_topic(a):
 
 def fake_request(method, url, params=None, json=None, headers=None, **kw):
     if "fomoapi" in url:
+        if "/leaderboard/tokens/graduated" in url:
+            return Resp({"board": "graduated", "tokens": [{"rank": 3, "network": "solana", "holders": 1800,
+                                                           "marketCapUsd": 300_000,
+                                                           "token": {"address": EARLY.split(":")[1]}}]},
+                        {"x-credits-cost": "250"})
         if "/leaderboard/tokens/trending" in url:
             net = {"solana": "sol", "base": "base", "bsc": "bnb", "robinhood": "robinhood"}
             return Resp({"tokens": [{"rank": i + 1, "network": net[k.split(':')[0]], "token": {"address": k.split(":")[1]}}
@@ -191,6 +200,12 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
                                  "topics": [evm.TRANSFER, evm_topic("0x" + "8" * 40), evm_topic(AIRDROP_TO)],
                                  "data": hex(10 ** 24), "transactionHash": "0xairdrop-1", "blockNumber": hex(blk)})
             return Resp({"result": logs})
+    if "dexscreener" in url and "/token-profiles/latest" in url:
+        return Resp([{"chainId": "solana", "tokenAddress": EARLY.split(":")[1], "url": "", "links": []},
+                     {"chainId": "solana", "tokenAddress": "JUNKx555555555555555555555555555555555pump"},
+                     {"chainId": "base", "tokenAddress": "0xabc"}])
+    if "dexscreener" in url and "/community-takeovers/" in url:
+        return Resp([])
     if "dexscreener" in url:
         chain_id, addrs = url.split("/tokens/v1/")[1].split("/")
         pairs = []
@@ -206,7 +221,8 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
                           "priceUsd": str(c[1]), "marketCap": c[2], "liquidity": {"usd": c[3]},
                           "priceChange": {"h1": c[4], "h24": c[4] * 2},
                           "txns": {"h1": {"buys": c[5], "sells": c[6]}},
-                          "volume": {"h1": c[5] * 90, "h6": c[5] * 300}, "pairCreatedAt": (NOW - 9 * 86400) * 1000,
+                          "volume": {"h1": c[5] * 90, "h6": c[5] * 300},
+                          "pairCreatedAt": (NOW - AGE_H.get(f"{chain_id}:{a}", 9 * 24) * 3600) * 1000,
                           "url": f"https://dexscreener.com/{chain_id}/{a}",
                           "info": {"socials": [{"type": "twitter", "url": "https://x.com/demo"},
                                                {"type": "telegram", "url": f"https://t.me/{c[0].lower()}"}],
@@ -214,6 +230,9 @@ def fake_request(method, url, params=None, json=None, headers=None, **kw):
         return Resp(pairs)
     if "geckoterminal" in url:
         net = url.split("/networks/")[1].split("/")[0]
+        if url.endswith("/new_pools"):
+            return Resp({"data": [{"relationships": {"base_token": {"data": {"id": "solana_" + EARLY.split(":")[1]}}}},
+                                  {"relationships": {"base_token": {"data": {"id": "solana_So11111111111111111111111111111111111111112"}}}}]})
         if url.endswith("/trending_pools"):
             return Resp({"data": [{"relationships": {"base_token": {"data": {"id": f"{net}_{k.split(':')[1]}"}}}}
                                   for k in COINS if k.startswith(net + ":")]})
