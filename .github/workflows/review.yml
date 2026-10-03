@@ -1,0 +1,42 @@
+name: Review my trades
+
+on:
+  workflow_dispatch:
+    inputs:
+      handle:
+        description: "Your FOMO handle"
+        required: true
+        default: williamsqui
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Review trades
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          HANDLE: ${{ inputs.handle }}
+        run: python -m scanner.review "$HANDLE"
+
+      - name: Save the full data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trade-review
+          path: out/review.*
+          if-no-files-found: ignore
