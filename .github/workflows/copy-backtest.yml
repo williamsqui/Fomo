@@ -42,6 +42,7 @@ jobs:
       - name: Backtest copying them
         env:
           FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
