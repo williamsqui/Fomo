@@ -24,7 +24,7 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import config, report, state as st
+from . import config, http, report, state as st
 from .fomo import _get
 from .tracker import trade_pnl
 
@@ -54,6 +54,20 @@ def _ts(v):
         return None
 
 
+MEANING = {"401": "your FOMO_API_KEY secret is missing or no longer valid",
+           "402": "your FOMO API credits for this month are used up",
+           "404": "FOMO doesn't know this handle - check the spelling",
+           "429": "too many requests at once (free keys: 20 a minute) - try again in a few minutes"}
+
+
+def explain(err):
+    """Turn the API's raw error into plain words (and keep the raw text for me to read)."""
+    code = (err or "").split(" ", 1)[0]
+    if not err:
+        return "no reply at all from the FOMO API (network problem or the API is down)"
+    return f"{MEANING.get(code, 'FOMO API error')} [{err[:160]}]"
+
+
 def opened(p):
     return next((_ts(p[k]) for k in OPEN_KEYS if p.get(k) not in (None, "")), None)
 
@@ -80,9 +94,15 @@ def history(s, handle, since):
     DIAG[handle] = diag
     for _ in range(MAX_PAGES):
         d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True)
+        if d is None and diag["pages"] == 0:
+            first_err = http.LAST_ERROR[0]
+            time.sleep(4)                                 # free keys: 20 requests a minute
+            d = _get(s, f"/v2/users/{handle}/positions", 250, None, required=True)   # plain, no options
+            if d is None:
+                http.LAST_ERROR[0] = http.LAST_ERROR[0] or first_err
         diag["pages"] += 1
         if d is None:
-            diag["error"] = "no answer from the FOMO API (out of credits, wrong handle, or the API is down)"
+            diag["error"] = explain(http.LAST_ERROR[0])
             break
         if diag["pages"] == 1:
             diag["top_keys"] = sorted(d)[:12] if isinstance(d, dict) else f"list of {len(d)}"
@@ -283,6 +303,7 @@ def run(handles=None, days=None):
                 rows.append(r)
         results[h] = rows
         log.info("%s: %d positions, %d copyable", h, len(ps), len(rows))
+        time.sleep(3)                                     # stay under 20 requests a minute
     os.makedirs("out", exist_ok=True)
     flat = [r for rows in results.values() if rows for r in rows]
     if flat:

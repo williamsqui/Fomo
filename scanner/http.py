@@ -22,6 +22,7 @@ def request(method, url, *, retries=3, timeout=20, **kw):
             time.sleep(2 ** attempt + 1)
             continue
         if r.status_code == 402:
+            LAST_ERROR[0] = f"402 {r.text[:200]}"
             log.error("Out of credits: %s", url.split("?")[0])
             return None
         if not r.ok:

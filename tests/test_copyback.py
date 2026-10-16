@@ -72,3 +72,17 @@ rows = {r["symbol"]: r for r in __import__("csv").DictReader(open("out/copyback.
 assert "MS" in rows and float(rows["MS"]["pnl"]) > 30, rows
 assert "What the FOMO API returned" in mail[-1][1]
 print("API shape variants OK")
+
+# an API error is spelled out in the email, not hidden
+from scanner import http  # noqa: E402
+
+
+class R402:
+    ok, status_code, text, headers = False, 402, '{"error":"credits_exhausted"}', {}
+
+
+fomo.request = http.request
+http.SESSION.request = lambda *a, **k: R402()
+copyback.run("mickeymantled", 30)
+assert "credits for this month are used up" in mail[-1][1], mail[-1][1][-800:]
+print("API errors explained OK")
