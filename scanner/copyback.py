@@ -54,7 +54,12 @@ def _ts(v):
         return None
 
 
-MEANING = {"401": "your FOMO_API_KEY secret is missing or no longer valid",
+MEANING = {"timeout/network:": "the FOMO API took too long to answer (busy, or a very large history) - run it again",
+           "500": "the FOMO API had an internal error - run it again later",
+           "502": "the FOMO API was temporarily unreachable - run it again later",
+           "503": "the FOMO API was temporarily unavailable - run it again later",
+           "504": "the FOMO API timed out putting this history together - run it again",
+           "401": "your FOMO_API_KEY secret is missing or no longer valid",
            "402": "your FOMO API credits for this month are used up",
            "404": "FOMO doesn't know this handle - check the spelling",
            "429": "too many requests at once (free keys: 20 a minute) - try again in a few minutes"}
@@ -93,11 +98,13 @@ def history(s, handle, since):
     out, cursor, diag = [], "start", {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
     DIAG[handle] = diag
     for _ in range(MAX_PAGES):
-        d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True)
+        # a very active trader's history is assembled live by the API and can take a while
+        d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True,
+                 timeout=90)
         if d is None and diag["pages"] == 0:
             first_err = http.LAST_ERROR[0]
             time.sleep(4)                                 # free keys: 20 requests a minute
-            d = _get(s, f"/v2/users/{handle}/positions", 250, None, required=True)   # plain, no options
+            d = _get(s, f"/v2/users/{handle}/positions", 250, None, required=True, timeout=90)   # plain
             if d is None:
                 http.LAST_ERROR[0] = http.LAST_ERROR[0] or first_err
         diag["pages"] += 1

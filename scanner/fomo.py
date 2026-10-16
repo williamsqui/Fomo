@@ -17,14 +17,14 @@ log = logging.getLogger("fomo")
 COST = {"leaderboard": 250, "trending": 250, "thesis": 1250}
 
 
-def _get(s, path, cost, params=None, required=False):
+def _get(s, path, cost, params=None, required=False, timeout=20):
     if not config.FOMO_API_KEY:
         return None
     if not required and not st.within_budget(
             s["fomo_credits_used"], config.FOMO_MONTHLY_CREDITS, cost):
         log.info("FOMO budget pacing: skipping %s", path)
         return None
-    r = request("GET", config.FOMO_BASE + path, params=params,
+    r = request("GET", config.FOMO_BASE + path, params=params, timeout=timeout,
                 headers={"authorization": f"Bearer {config.FOMO_API_KEY}"})
     if r is None:
         return None

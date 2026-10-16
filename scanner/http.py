@@ -15,10 +15,12 @@ def request(method, url, *, retries=3, timeout=20, **kw):
         try:
             r = SESSION.request(method, url, timeout=timeout, **kw)
         except requests.RequestException as e:
+            LAST_ERROR[0] = f"timeout/network: {type(e).__name__}"
             log.warning("%s %s failed: %s", method, url.split("?")[0], e)
             time.sleep(2 ** attempt)
             continue
         if r.status_code == 429 or r.status_code >= 500:
+            LAST_ERROR[0] = f"{r.status_code} {r.text[:200]}"
             time.sleep(2 ** attempt + 1)
             continue
         if r.status_code == 402:
