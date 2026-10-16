@@ -34,55 +34,129 @@ e = report.e
 MAX_PAGES = int(os.getenv("COPYBACK_PAGES") or 6)
 
 
-def _ts(iso):
+DIAG = {}   # handle -> what the API actually returned (shown in the email, so a blank result explains itself)
+OPEN_KEYS = ("createdAt", "openedAt", "created_at", "opened_at", "firstBuyAt", "firstTradeAt", "timestamp", "time")
+CLOSE_KEYS = ("closedAt", "closed_at", "lastSellAt", "exitAt")
+
+
+def _ts(v):
+    """ISO text, epoch seconds or epoch milliseconds -> epoch seconds (None if unreadable)."""
+    if v in (None, ""):
+        return None
     try:
-        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp() if iso else None
+        x = float(v)
+        return x / 1000 if x > 1e11 else x
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
 
 
+def opened(p):
+    return next((_ts(p[k]) for k in OPEN_KEYS if p.get(k) not in (None, "")), None)
+
+
+def closed_at(p):
+    return next((_ts(p[k]) for k in CLOSE_KEYS if p.get(k) not in (None, "")), None)
+
+
+def _positions(d):
+    if isinstance(d, list):
+        return d
+    if not isinstance(d, dict):
+        return []
+    for k in ("positions", "items", "trades", "results"):
+        if isinstance(d.get(k), list):
+            return d[k]
+    inner = d.get("data")
+    return _positions(inner) if inner is not None else []
+
+
 def history(s, handle, since):
     """Their positions opened since `since` (pages until older than that, max MAX_PAGES)."""
-    out, cursor = [], "start"
+    out, cursor, diag = [], "start", {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
+    DIAG[handle] = diag
     for _ in range(MAX_PAGES):
         d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True)
-        if not isinstance(d, dict) or d.get("available") is False:
+        diag["pages"] += 1
+        if d is None:
+            diag["error"] = "no answer from the FOMO API (out of credits, wrong handle, or the API is down)"
             break
-        page = d.get("positions") or []
+        if diag["pages"] == 1:
+            diag["top_keys"] = sorted(d)[:12] if isinstance(d, dict) else f"list of {len(d)}"
+        if isinstance(d, dict) and d.get("available") is False:
+            diag["error"] = "FOMO API says this trader's history isn't available"
+            break
+        page = _positions(d)
+        if page and "fields" not in diag:
+            diag["fields"] = sorted(page[0])[:25]
         out += page
-        cursor = d.get("nextCursor")
-        closed = [_ts(p.get("createdAt")) for p in page if p.get("status") == "closed"]
-        if not cursor or (closed and min(x for x in closed if x) < since):
+        cursor = d.get("nextCursor") or d.get("cursor") if isinstance(d, dict) else None
+        dates = [opened(p) for p in page]
+        dates = [x for x in dates if x]
+        if not cursor or not page or (dates and min(dates) < since):
             break
+    diag["fetched"] = len(out)
     seen, uniq = set(), []
     for p in out:
-        k = p.get("tradeId") or ((p.get("token") or {}).get("address"), p.get("createdAt"))
-        if k not in seen and (_ts(p.get("createdAt")) or 0) >= since:
+        t = opened(p)
+        if t is None:
+            diag["no_date"] += 1
+            continue
+        if t < since:
+            diag["too_old"] += 1
+            continue
+        k = p.get("tradeId") or ((p.get("token") or {}).get("address"), t)
+        if k not in seen:
             seen.add(k)
             uniq.append(p)
     return uniq
 
 
-def copy_trade(p, size, lag):
+SKIP = {}   # handle -> {reason: count}
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def copy_trade(p, size, lag, why=None):
     """One of their trades copied with $size. Returns a row, or None if it can't be priced."""
+    why = why if why is not None else {}
+    p = {k: (_num(v) if k in ("avgEntryPrice", "avgExitPrice", "priceUsd", "costBasisUsd", "boughtAmount",
+                                "soldAmount", "transferredInAmount", "realizedPnlUsd", "unrealizedPnlUsd") else v)
+         for k, v in p.items()}
     entry = p.get("avgEntryPrice")
-    if not entry or entry <= 0 or (p.get("costBasisUsd") or 0) < 5:
-        return None                                   # received (not bought), or dust
+    if not entry or entry <= 0:
+        why["received, not bought (no entry price)"] = why.get("received, not bought (no entry price)", 0) + 1
+        return None
+    if (p.get("costBasisUsd") or 0) < 5:
+        why["under $5 (dust)"] = why.get("under $5 (dust)", 0) + 1
+        return None
     now_px, out_px = p.get("priceUsd"), p.get("avgExitPrice")
     got = (p.get("boughtAmount") or 0) + (p.get("transferredInAmount") or 0)
     sold = (p.get("soldAmount") or 0) / got if got else 0
-    if p.get("status") == "closed":
+    status = str(p.get("status") or "").lower()
+    is_closed = status == "closed" or (not status and closed_at(p) is not None)
+    if is_closed:
         if not out_px:
-            return None                               # sent away rather than sold: can't tell
+            why["sent away, not sold (no exit price)"] = why.get("sent away, not sold (no exit price)", 0) + 1
+            return None
         exit_px, how = out_px, "closed"
     else:
         if not now_px:
+            why["open, no current price"] = why.get("open, no current price", 0) + 1
             return None
         sold = min(max(sold, 0), 1)
         exit_px = (sold * out_px + (1 - sold) * now_px) if (out_px and sold) else now_px
         how = "still open (valued now)"
-    t_in = _ts(p.get("createdAt"))
-    t_out = _ts(p.get("closedAt")) if p.get("status") == "closed" else None
+    t_in = opened(p)
+    t_out = closed_at(p) if is_closed else None
     their = (p.get("realizedPnlUsd") or 0) + (p.get("unrealizedPnlUsd") or 0)
     return {"symbol": (p.get("token") or {}).get("symbol") or "?",
             "address": (p.get("token") or {}).get("address"), "status": how,
@@ -117,6 +191,22 @@ def tally(rows, size):
             "best": max(rows, key=lambda r: r["pnl"]) if rows else None,
             "worst": min(rows, key=lambda r: r["pnl"]) if rows else None,
             "big": sum(1 for r in rows if r["move_pct"] >= 100), "fees": round(n * 2 * config.FEE_MIN_USD, 2)}
+
+
+def diag_html():
+    """What the FOMO API actually gave us per trader - so an empty table explains itself."""
+    rows = ""
+    for h, d in DIAG.items():
+        sk = "; ".join(f"{k}: {v}" for k, v in (SKIP.get(h) or {}).items()) or "-"
+        rows += (f"<tr><td>@{e(h)}</td><td>{d.get('fetched', 0)}</td><td>{d.get('too_old', 0)}</td>"
+                 f"<td>{d.get('no_date', 0)}</td><td>{e(sk)}</td>"
+                 f"<td style='font-size:10px'>{e(d.get('error') or '')} {e(str(d.get('top_keys', '')))}<br>"
+                 f"{e(', '.join(d.get('fields') or []))}</td></tr>")
+    if not rows:
+        return ""
+    return f"""<h3 style="margin:14px 0 6px;font-size:13px">What the FOMO API returned</h3>
+<table style="border-collapse:collapse;font-size:11px;width:100%;color:#555" border="1" cellpadding="3">
+<tr><th>Trader</th><th>Trades fetched</th><th>Older than window</th><th>No date</th><th>Skipped</th><th>Details</th></tr>{rows}</table>"""
 
 
 def build_email(results, size, days, lag):
@@ -161,6 +251,7 @@ that much, you'd have missed some of their trades.</p>
 <h3 style="margin:14px 0 6px">Biggest copied trades (with copy lag)</h3>
 <table style="border-collapse:collapse;font-size:12px;width:100%" border="1" cellpadding="3">
 <tr style="background:#f3f3f3"><th>Coin</th><th>Trader</th><th>Opened (UTC)</th><th>Their move</th><th>Your ${size:.0f}</th><th></th></tr>{trows}</table>
+{diag_html()}
 <p style="font-size:11px;color:#888">Their FOMO-app trades only, at average prices. Coins they received or sent instead of
 buying/selling are skipped. One month is a short sample - the live paper copy books in your digest are the real test.
 Full data: out/copyback.csv in this run's Artifacts. Not financial advice.</p></body></html>"""
@@ -184,9 +275,9 @@ def run(handles=None, days=None):
         if ps is None:
             results[h] = None
             continue
-        rows = []
+        rows, why = [], SKIP.setdefault(h, {})
         for p in ps:
-            r = copy_trade(p, size, lag)
+            r = copy_trade(p, size, lag, why)
             if r:
                 r["trader"] = h
                 rows.append(r)

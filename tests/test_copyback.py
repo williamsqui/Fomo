@@ -52,3 +52,23 @@ assert "Copy backtest (30d, $20/trade)" in subj and "@ghost" in body and "Money 
 t = copyback.tally([copyback.copy_trade(p, 20, 3) | {"trader": "w"} for p in HIST["winner"][:3]], 20)
 assert t["peak"] == 2 and t["capital"] == 40, t     # MOON and RUG overlapped
 print("copy backtest OK:", subj)
+
+# other shapes the API might use: nested under "data", epoch-millisecond dates, numbers as text
+HIST["shapes"] = {"data": {"positions": [
+    {"tradeId": "x", "token": {"symbol": "MS"}, "status": "CLOSED", "avgEntryPrice": "1.0", "avgExitPrice": "3.0",
+     "costBasisUsd": "50", "openedAt": int((NOW - 2 * 86400) * 1000), "closedAt": int((NOW - 86400) * 1000)}]}}
+fake_orig = fake
+
+
+def fake2(method, url, params=None, **kw):
+    if "/users/shapes/positions" in url:
+        return demo.Resp(HIST["shapes"], {"x-credits-cost": "250"})
+    return fake_orig(method, url, params=params, **kw)
+
+
+fomo.request = fake2
+copyback.run("shapes", 30)
+rows = {r["symbol"]: r for r in __import__("csv").DictReader(open("out/copyback.csv"))}
+assert "MS" in rows and float(rows["MS"]["pnl"]) > 30, rows
+assert "What the FOMO API returned" in mail[-1][1]
+print("API shape variants OK")
