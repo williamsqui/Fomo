@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from . import config, http, report, state as st
+from . import chains, config, http, report, state as st
 from .fomo import _get
 from .tracker import trade_pnl
 
@@ -179,6 +179,11 @@ def history(s, handle, since, cache=None):
     cache = cache if cache is not None else {}
     diag = {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
     DIAG[handle] = diag
+    if chains.wallet_kind(handle):                # a bare wallet address: rebuild it from the chain
+        from . import walletback
+        ps = walletback.history(s, handle.strip().lstrip("@"), since, cache, diag, _DEADLINE[0])
+        save_cache(cache)
+        return ps
     ent = cache.get(handle.lower())
     if (not ent or ent.get("since", 0) > since + 3600 or time.time() - ent.get("updated", 0) > 3 * 86400):
         ent = {"positions": {}, "cursor": None, "done": False, "since": since, "updated": time.time()}
@@ -273,6 +278,21 @@ def history(s, handle, since, cache=None):
 
 
 SKIP = {}   # handle -> {reason: count}
+OWN = {}    # handle -> their own real-money result on positions opened in the window
+
+
+def own_pnl(ps):
+    """What THEY made with their own money and their own sizes: realized + unrealized P&L on every
+    position they opened in the window (as FOMO reports it), and how much they put in."""
+    pnl = inv = 0.0
+    n = wins = 0
+    for p in ps:
+        r, u = _num(p.get("realizedPnlUsd")) or 0.0, _num(p.get("unrealizedPnlUsd")) or 0.0
+        pnl += r + u
+        inv += _num(p.get("costBasisUsd")) or 0.0
+        n += 1
+        wins += 1 if r + u > 0 else 0
+    return {"pnl": round(pnl, 2), "invested": round(inv, 2), "n": n, "wins": wins}
 
 
 def _num(v):
@@ -315,8 +335,11 @@ def copy_trade(p, size, lag, why=None):
     t_in = opened(p)
     t_out = closed_at(p) if is_closed else None
     their = (p.get("realizedPnlUsd") or 0) + (p.get("unrealizedPnlUsd") or 0)
-    return {"symbol": (p.get("token") or {}).get("symbol") or "?",
-            "address": (p.get("token") or {}).get("address"), "status": how,
+    tok = p.get("token") or {}
+    return {"symbol": tok.get("symbol") or "?",
+            "address": tok.get("address") or tok.get("mint"), "status": how,
+            "network": tok.get("network") or tok.get("chain") or p.get("network") or p.get("chain") or "sol",
+            "entry": entry, "exit_px": exit_px,
             "opened": datetime.fromtimestamp(t_in, timezone.utc).strftime("%Y-%m-%d %H:%M") if t_in else "",
             "t_in": t_in, "t_out": t_out,
             "their_pct": round(100 * their / p["costBasisUsd"], 1) if p.get("costBasisUsd") else None,
@@ -357,7 +380,7 @@ def diag_html():
         sk = "; ".join(f"{k}: {v}" for k, v in (SKIP.get(h) or {}).items()) or "-"
         back = (datetime.fromtimestamp(d["back_to"], timezone.utc).strftime("%b %d") if d.get("back_to") else "-")
         state = "<b style='color:#0a7d38'>complete</b>" if d.get("complete") else "in progress"
-        rows += (f"<tr><td>@{e(h)}<br>{state} · back to {back} · {d.get('pages', 0)} pages this run"
+        rows += (f"<tr><td>{e(chains.who(h))}<br>{state} · back to {back} · {d.get('pages', 0)} pages this run"
                  f"{'<br><b>' + e(d['partial']) + '</b>' if d.get('partial') else ''}</td>"
                  f"<td>{d.get('fetched', 0)}</td><td>{d.get('too_old', 0)}</td>"
                  f"<td>{d.get('no_date', 0)}</td><td>{e(sk)}</td>"
@@ -377,10 +400,10 @@ def build_email(results, size, days, lag):
     body_rows, all_rows = "", []
     for h, rows in sorted(results.items(), key=lambda x: -tally(x[1], size)["pnl_lag"] if x[1] else 0):
         if rows is None:
-            body_rows += f"<tr><td>@{e(h)}</td><td colspan='7'>no trade history from the FOMO API</td></tr>"
+            body_rows += f"<tr><td>{e(chains.who(h))}</td><td colspan='8'>no trade history from the FOMO API</td></tr>"
             continue
         if not rows and DIAG.get(h, {}).get("error"):
-            body_rows += (f"<tr><td>@{e(h)}</td><td colspan='7' style='color:#b36b00'>couldn't get their history: "
+            body_rows += (f"<tr><td>{e(chains.who(h))}</td><td colspan='8' style='color:#b36b00'>couldn't get their history: "
                           f"{e(DIAG[h]['error'].split(' [')[0])}</td></tr>")
             continue
         t = tally(rows, size)
@@ -390,7 +413,10 @@ def build_email(results, size, days, lag):
         worst = f"${e(t['worst']['symbol'])} {usd(t['worst']['pnl'])}" if t["worst"] else "-"
         part = DIAG.get(h, {}).get("partial")
         flag = "<br><span style='color:#b36b00;font-size:11px'>partial data - see below</span>" if part else ""
-        body_rows += (f"<tr><td>@{e(h)}{flag}</td><td>{t['n']}</td><td>{wr}</td>"
+        o = OWN.get(h) or {}
+        own = (f"<b style='color:{col(o['pnl'])}'>{usd(o['pnl'])}</b><br><span style='font-size:11px;color:#888'>"
+               f"on ${o['invested']:,.0f} put in · {o['n']} positions</span>") if o else "-"
+        body_rows += (f"<tr><td>{e(chains.who(h))}{flag}</td><td>{own}</td><td>{t['n']}</td><td>{wr}</td>"
                       f"<td style='color:{col(t['pnl'])}'>{usd(t['pnl'])}</td>"
                       f"<td style='color:{col(t['pnl_lag'])}'><b>{usd(t['pnl_lag'])}</b></td>"
                       f"<td>${t['capital']:,.0f}<br><span style='font-size:11px;color:#888'>{t['peak']} at once</span></td>"
@@ -407,9 +433,9 @@ with ${size:.0f} each, buying and selling when they did. FOMO fees and 1% slippa
 <b>"With copy lag"</b> also assumes you buy {lag:.0f}% higher and sell {lag:.0f}% lower than they did (you only see their
 trade after it happens) - that's the realistic column. Open trades are valued at today's price.</p>
 <table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
-<tr style="background:#f3f3f3"><th>Trader</th><th>Trades</th><th>Winners</th><th>Exact copy</th><th>With copy lag</th>
+<tr style="background:#f3f3f3"><th>Trader</th><th>Their own P&amp;L<br><span style="font-weight:normal;font-size:11px">(their money, their sizes)</span></th><th>Trades</th><th>Winners</th><th>Exact copy</th><th>With copy lag</th>
 <th>Money needed</th><th>Best</th><th>Worst</th></tr>{body_rows}
-<tr style="background:#f9f9f9"><td><b>All of them</b></td><td>{T['n']}</td><td>-</td>
+<tr style="background:#f9f9f9"><td><b>All of them</b></td><td>{usd(sum(o['pnl'] for o in OWN.values()))}</td><td>{T['n']}</td><td>-</td>
 <td style='color:{col(T['pnl'])}'>{usd(T['pnl'])}</td><td style='color:{col(T['pnl_lag'])}'><b>{usd(T['pnl_lag'])}</b></td>
 <td>${T['capital']:,.0f}</td><td colspan="2">{T['big']} trades doubled or better</td></tr></table>
 <p style="font-size:13px">Fees alone on {T['n']} copied trades: at least ${T['fees']:,.2f} (FOMO's $0.95 minimum each way on
@@ -423,6 +449,9 @@ that much, you'd have missed some of their trades.</p>
 buying/selling are skipped. One month is a short sample - the live paper copy books in your digest are the real test.
 Full data: out/copyback.csv in this run's Artifacts. Not financial advice.</p></body></html>"""
     subject = f"Copy backtest ({days}d, ${size:.0f}/trade): {usd(T['pnl_lag'])} with copy lag across {T['n']} trades"
+    if len(OWN) == 1:
+        (h1, o1), = OWN.items()
+        subject += f" · {chains.who(h1)} made {usd(o1['pnl'])} themselves"
     return subject, body
 
 
@@ -451,7 +480,8 @@ def run(handles=None, days=None):
                 r["trader"] = h
                 rows.append(r)
         results[h] = rows
-        log.info("%s: %d positions, %d copyable", h, len(ps), len(rows))
+        OWN[h] = own_pnl(ps)
+        log.info("%s: %d positions, %d copyable, own P&L %s", h, len(ps), len(rows), OWN[h])
         time.sleep(3)                                     # stay under 20 requests a minute
     os.makedirs("out", exist_ok=True)
     flat = [r for rows in results.values() if rows for r in rows]

@@ -109,6 +109,21 @@ Repo → **Actions** → **Check my position** → **Run workflow**. Fill in:
 
 About 2 minutes later you get a verdict email: **HOLD**, **HOLD - TIGHTEN STOP**, **TAKE PROFIT** or **SELL**. It includes the reasons for and against holding, your estimated entry, the target and stop-loss prices, how much selling would cost in fees, and which top-100 traders still hold the coin. To ask follow-up questions, paste the email into your Claude chat.
 
+## Watchlist: alerts on coins you hold
+These coins are watched every 10 minutes for 7 days:
+
+- every coin the scanner emails you as a pick (added automatically)
+- every coin you run **Check my position** on
+
+You get a **"WATCHLIST ALERT"** email when:
+
+- a top-100 trader who holds it sells out, or sells about half
+- one wallet can now pull 50%+ of the liquidity, or the coin newly fails a safety check (Base/BNB)
+- the liquidity pool shrinks 30%+ since watching began
+- the price hits your stop-loss or +50% target
+
+When you sell, run **Check my position** again and type `sold` in the gain box, and the alerts for that coin stop. For picks, the normal exit alert already covers the first 48 hours, so you never get the same news twice. Cost: Base/BNB checks are free, and Solana uses 1 Helius credit per watched trader per scan.
+
 ## Backtest (rough, Solana, ~90 days)
 Repo → **Actions** → **Backtest** → **Run workflow**. It takes 1–4 hours, then emails you a table showing what copying today's top traders would have made, with your +50% / −30% / 48h exits and FOMO fees included. Every simulated trade is attached as a CSV on the run page.
 
@@ -164,3 +179,12 @@ python tests/test_freshness.py  # checks stale/pumped/dumping coins are dropped 
 - Scans run every 10 minutes (sometimes later on GitHub), so a coin can still move before you act. Exit alerts can be 10–20 minutes late. Set a stop-loss in the FOMO app if it supports one.
 - Robinhood Chain has fewer safety tools. Those coins need a verified contract and a higher score to be sent.
 - Public RPCs can be slow or rate-limited. If a chain keeps getting skipped, add a free Alchemy/Ankr URL as `BASE_RPC_URL` / `BSC_RPC_URL` / `ROBINHOOD_RPC_URL`.
+
+## Copy a wallet that isn't on FOMO
+
+`COPY_TRADERS` takes FOMO handles **and** bare wallet addresses, mixed, comma separated.
+Change it without editing code: Settings → Secrets and variables → Actions → **Variables** →
+`COPY_TRADERS` (e.g. `bystevenr,sAdNbe1cKNMDqDsa4npB3TfL62T14uAo2MsUQfLvzLT`).
+Solana wallets are read with Helius (2 credits a scan); 0x wallets on Base/Robinhood free via Blockscout.
+The copy backtest and the stop-loss/take-profit backtest also accept a Solana wallet address in the
+"traders" box: its swaps are rebuilt from the chain (1 Helius credit per transaction, resumable).

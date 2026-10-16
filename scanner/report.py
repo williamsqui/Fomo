@@ -116,7 +116,7 @@ def copy_table(s):
     for c in sorted(cs, key=lambda c: -c["their"]["pnl"]):
         days = max(0.1, (time.time() - c["since"]) / 86400)
         hold = ", ".join("$" + e(x) for x in c["holding"][:4]) or "-"
-        rows += (f"<tr><td>@{e(c['handle'])}<br><span style='color:#888;font-size:11px'>{days:.0f}d · open: {hold}</span></td>"
+        rows += (f"<tr><td>{e(chains.who(c['handle']))}<br><span style='color:#888;font-size:11px'>{days:.0f}d · open: {hold}</span></td>"
                  f"<td>{c['their']['n']}</td><td>{wr(c['their'])}</td>"
                  f"<td style='color:{col(c['their']['pnl'])}'><b>{_usd(c['their']['pnl'])}</b></td>"
                  f"<td style='color:{col(c['yours']['pnl'])}'>{_usd(c['yours']['pnl'])}</td></tr>")

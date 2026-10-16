@@ -159,7 +159,9 @@ LEARN_DAYS = _int("LEARN_DAYS", 30)               # only recent lessons count
 # ---- Copy one trader (paper only) --------------------------------------------
 COPY_TRADER = os.getenv("COPY_TRADER", "ether_monk")   # (old single-trader setting, still honoured)
 # Everyone in this list gets their own paper copy book (blank = off). Wallets are looked up once.
-COPY_TRADERS = _list("COPY_TRADERS", "ether_monk,bystevenr,mickeymantled,frankdegods,tjr,brezscales")
+# FOMO handles and/or bare wallet addresses (Solana, or 0x... for Base/Robinhood) of people not on FOMO
+COPY_TRADERS = _list("COPY_TRADERS", "ether_monk,bystevenr,mickeymantled,frankdegods,tjr,brezscales,"
+                                     "sAdNbe1cKNMDqDsa4npB3TfL62T14uAo2MsUQfLvzLT")
 COPY_SIZE_USD = _float("COPY_SIZE_USD", 20)
 COPY_BACKTEST_DAYS = _int("COPY_BACKTEST_DAYS", 30)
 COPY_LAG_PCT = _float("COPY_LAG_PCT", 3)    # backtest: you buy this much higher / sell lower than they did

@@ -43,3 +43,22 @@ def norm(chain, addr):
 def split(k):
     c, a = k.split(":", 1)
     return c, a
+
+
+_B58 = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+
+
+def wallet_kind(s):
+    """'solana' / 'evm' if s is a bare wallet address (not a FOMO handle), else None."""
+    s = (s or "").strip().lstrip("@")
+    if s.startswith("0x") and len(s) == 42 and all(c in "0123456789abcdefABCDEF" for c in s[2:]):
+        return "evm"
+    if 32 <= len(s) <= 44 and set(s) <= _B58:
+        return "solana"
+    return None
+
+
+def who(h):
+    """How a copied trader is shown in emails: @handle, or a shortened wallet address."""
+    h = (h or "").strip().lstrip("@")
+    return f"wallet {h[:4]}..{h[-4:]}" if wallet_kind(h) else f"@{h}"

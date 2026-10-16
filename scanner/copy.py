@@ -82,8 +82,14 @@ def _skip(chain, addr):
 
 # ------------------------------------------------------------------ whose wallets
 def wallets(s, b=None):
-    """Their Solana / EVM addresses: from your settings, the leaderboard, or the FOMO API."""
+    """Their Solana / EVM addresses: the address itself (COPY_TRADERS can list bare wallets that
+    aren't on FOMO), your settings, the leaderboard, or the FOMO API."""
     b = b or _book(s)
+    kind = chains.wallet_kind(b["handle"])
+    if kind:                                      # a bare wallet address: nothing to look up
+        a = b["handle"].strip().lstrip("@")
+        b["wallets"] = {"solana": a if kind == "solana" else None, "evm": a.lower() if kind == "evm" else None}
+        return b["wallets"]
     if (config.COPY_SOLANA_WALLET or config.COPY_EVM_WALLET) and b["handle"].lower() == config.COPY_TRADER.lower():
         b["wallets"] = {"solana": config.COPY_SOLANA_WALLET or None,
                         "evm": (config.COPY_EVM_WALLET or "").lower() or None}
@@ -190,7 +196,7 @@ def scan(s):
     opened, looked = [], 0
     for h in handles():
         b = _book(s, h)
-        if not (b["wallets"].get("solana") or b["wallets"].get("evm")):
+        if not (b["wallets"].get("solana") or b["wallets"].get("evm")) and not chains.wallet_kind(h):
             if looked >= 2:              # wallet lookups cost 2,500 FOMO credits: 2 per scan
                 continue
             looked += 1
