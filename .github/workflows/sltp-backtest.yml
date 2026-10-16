@@ -1,0 +1,74 @@
+name: Stop-loss / take-profit backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      traders:
+        description: "FOMO handles or Solana wallet addresses, comma separated"
+        required: true
+        default: "bystevenr"
+      days:
+        description: "How many days back"
+        required: true
+        default: "30"
+      fee:
+        description: "Copy bot fee % per buy and sell (CopyFomo = 2)"
+        required: true
+        default: "2"
+
+concurrency:
+  group: copy-backtest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sltp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Restore fetched history
+        uses: actions/cache/restore@v4
+        with:
+          path: cbcache
+          key: copyback-${{ github.run_id }}
+          restore-keys: copyback-
+
+      - name: Replay stop-loss / take-profit settings
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          COPY_SIZE_USD: ${{ vars.COPY_SIZE_USD }}
+          COPYBACK_MAX_SECONDS: "600"
+          SLTP_MAX_SECONDS: "1800"
+          COPYBOT_FEE_PCT: ${{ inputs.fee }}
+          TRADERS: ${{ inputs.traders }}
+          DAYS: ${{ inputs.days }}
+        run: python -m scanner.sltp "$TRADERS" "$DAYS"
+
+      - name: Save fetched history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cbcache
+          key: copyback-${{ github.run_id }}
+
+      - name: Save the full data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sltp-backtest
+          path: out/sltp.*
+          if-no-files-found: ignore
