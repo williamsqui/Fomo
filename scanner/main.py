@@ -124,32 +124,44 @@ def still_in(s, p):
     return ""
 
 
+def safe(s, name, fn, *a, default=None, **kw):
+    """Run one optional part of the scan. If it breaks, log it, note it for the email footer and
+    carry on - one flaky RPC or API must never stop your alerts again."""
+    try:
+        return fn(*a, **kw)
+    except Exception as ex:
+        log.exception("%s failed - skipped this scan", name)
+        s.setdefault("scan_errors", []).append(f"{name}: {type(ex).__name__}")
+        return default
+
+
 def run():
     s = st.load()
+    s["scan_errors"] = []
     if not config.FOMO_API_KEY:
         log.error("Missing FOMO_API_KEY secret")
         sys.exit(1)
     now = time.time()
     s["run_count"] += 1
-    watchlist.merge_requests(s)   # coins added/removed via "Check my position"
+    safe(s, "watchlist requests", watchlist.merge_requests, s)   # coins added/removed via "Check my position"
     watchlist.drop_auto(s)        # only coins you hold are watched (no more auto-added alerts)
     added = s.pop("_watch_added", [])
     if added:                     # proof the request really arrived
         report.send(*watchlist.build_added_email(added))
-    learn.update(s)               # what the paper trades have taught (refreshed every 6h)
+    safe(s, "learning", learn.update, s)   # what the paper trades have taught (refreshed every 6h)
 
     # 1. leaderboard + followed traders (top 50 and followed every run, the rest every 3rd run)
-    traders = fomo.tracked(s)             # the top 100 + the traders you follow
+    traders = safe(s, "followed traders", fomo.tracked, s) or fomo.leaderboard(s)   # top 100 + who you follow
     handles = [t["handle"] for t in traders]
     every = s["run_count"] % config.SLOW_WALLET_EVERY == 0
     scan_traders = [t for t in traders if every or t["rank"] <= config.FAST_WALLETS or t.get("followed")]
 
     # 2. what they traded since the last scan
     if "solana" in config.CHAINS and config.HELIUS_API_KEY:
-        solana.scan_wallets(s, scan_traders)          # full holdings of each wallet, diffed
+        safe(s, "Solana wallet reads", solana.scan_wallets, s, scan_traders)   # full holdings, diffed
         live = {t["wallet"] for t in traders if t.get("wallet")}
         s["wallet_snap"] = {w: v for w, v in (s.get("wallet_snap") or {}).items() if w in live}
-    evm.scan_wallets(s, traders)
+    safe(s, "Base/BNB/Robinhood wallet scan", evm.scan_wallets, s, traders)
     ctx = holders.context(s, traders)
     cutoff = now - config.LOOKBACK_HOURS * 3600
     recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
@@ -189,18 +201,19 @@ def run():
             s["dex_skip"][k] = now + 24 * 3600
     # 3b. Base/BNB/Robinhood: check what the top traders hold right now (works on free RPCs)
     investable = {k: m for k, m in markets.items() if k in cands and scoring.eligible(m, config.EARLY_MIN_HOLDERS)}
-    evm.holdings_scan(s, traders, investable)
+    safe(s, "Base/BNB/Robinhood holdings", evm.holdings_scan, s, traders, investable)
     ctx = holders.context(s, traders)
     recent = [e for e in s["trader_buys"] if e["ts"] >= cutoff]
     new_buy_keys = {e["key"] for e in recent if e["side"] == "buy" and e["ts"] >= now - 20 * 60}
-    tracker.update(s, markets)
+    safe(s, "track record", tracker.update, s, markets)
     # follow-up emails only for coins you actually hold (added via "Check my position")
-    exits = tracker.exit_checks(s, markets, only={k for k in watchlist.keys(s) if watchlist.held(s, k)})
+    exits = safe(s, "exit alerts", tracker.exit_checks, s, markets,
+                 only={k for k in watchlist.keys(s) if watchlist.held(s, k)}, default=[])
     if exits and config.EXIT_ALERTS:
         report.send(*report.build_exit(exits))
         log.info("Exit alerts: %s", [(p["symbol"], m) for p, m, _ in exits])
-    if config.COPY_TRADER:
-        copy.scan(s)                        # shadow book: paper-trade whatever one trader buys
+    if copy.handles():
+        safe(s, "copy book", copy.scan, s)   # shadow book: paper-trade whatever one trader buys
     # early lane (high risk): fresh launchpad coins, its own alerts + paper record
     if config.EARLY_LANE and "solana" in config.CHAINS:
         try:
@@ -215,9 +228,10 @@ def run():
                 early.mark_sent(s, due)
                 log.info("Early alert sent: %s", [r["market"]["symbol"] for r in due])
             markets.update({k: v for k, v in e_markets.items() if k in watchlist.keys(s)})
-        except Exception:
+        except Exception as ex:
             log.exception("early lane failed this scan (main scan continues)")
-    watched = watchlist.check(s, markets)   # coins you hold: top traders leaving, liquidity, stop/target
+            s["scan_errors"].append(f"early lane: {type(ex).__name__}")
+    watched = safe(s, "watchlist", watchlist.check, s, markets, default=[])   # coins you hold
     if watched and config.EXIT_ALERTS:
         report.send(*watchlist.build_email(watched))
 

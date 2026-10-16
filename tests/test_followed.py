@@ -6,6 +6,7 @@ import demo  # noqa: E402  (installs fake APIs)
 from scanner import config, fomo, holders, main, report, scoring, state, traders  # noqa: E402
 
 report.send = lambda *a: True
+config.FOMO_MONTHLY_CREDITS = 10_000_000   # budget pacing is near zero on the 1st of a month
 shutil.rmtree("out/demo_state", ignore_errors=True)
 assert len(config.FOLLOW_TRADERS) == 10 and "orangie" in config.FOLLOW_TRADERS
 for _ in range(4):                       # profile lookups are spread out, 3 per scan

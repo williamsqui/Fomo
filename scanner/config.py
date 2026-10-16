@@ -157,8 +157,12 @@ LEARN_MIN_GROUP = _int("LEARN_MIN_GROUP", 8)      # trades needed on each side o
 LEARN_DAYS = _int("LEARN_DAYS", 30)               # only recent lessons count
 
 # ---- Copy one trader (paper only) --------------------------------------------
-COPY_TRADER = os.getenv("COPY_TRADER", "ether_monk")   # blank to switch this off
-COPY_SIZE_USD = _float("COPY_SIZE_USD", 30)
+COPY_TRADER = os.getenv("COPY_TRADER", "ether_monk")   # (old single-trader setting, still honoured)
+# Everyone in this list gets their own paper copy book (blank = off). Wallets are looked up once.
+COPY_TRADERS = _list("COPY_TRADERS", "ether_monk,bystevenr,mickeymantled,frankdegods,tjr,brezscales")
+COPY_SIZE_USD = _float("COPY_SIZE_USD", 20)
+COPY_BACKTEST_DAYS = _int("COPY_BACKTEST_DAYS", 30)
+COPY_LAG_PCT = _float("COPY_LAG_PCT", 3)    # backtest: you buy this much higher / sell lower than they did
 COPY_MAX_DAYS = _float("COPY_MAX_DAYS", 7)             # give up if they never sell
 COPY_SOLANA_WALLET = os.getenv("COPY_SOLANA_WALLET", "")   # optional: skip the lookup
 COPY_EVM_WALLET = os.getenv("COPY_EVM_WALLET", "")

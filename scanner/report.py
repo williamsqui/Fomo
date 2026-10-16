@@ -106,31 +106,30 @@ def watch_table(s):
 
 
 def copy_table(s):
-    """The shadow book: what copying one trader would have done, on paper."""
-    c = copybook.summary(s)
-    if not c:
+    """The shadow books: what copying each trader would have done, on paper."""
+    cs = copybook.summaries(s)
+    if not cs:
         return ""
-    days = max(0.1, (time.time() - c["since"]) / 86400)
-    row = lambda name, v: (f"<tr><td>{name}</td><td>{v['n']}</td>"
-                           f"<td>{'-' if not v['n'] else str(round(100 * v['wins'] / v['n'])) + '%'}</td>"
-                           f"<td>{_usd(v['avg'])}</td>"
-                           f"<td style='color:{'#0a7d38' if v['pnl'] > 0 else '#b00020' if v['pnl'] < 0 else '#111'}'>"
-                           f"<b>{_usd(v['pnl'])}</b></td></tr>")
-    recent = ", ".join(f"${e(t['symbol'])} {_usd(t['mirror']['pnl'])} ({e(t['mirror']['how'])})"
-                       for t in c["recent"]) or "none closed yet"
-    holding = ", ".join("$" + e(x) for x in c["holding"]) or "nothing"
-    n_un = c.get("unnamed") or 0
-    unnamed = (f" · {n_un} of their buys skipped (DexScreener has no price or ticker for them,"
-               " usually LP/receipt tokens or a mint that's minutes old)") if n_un else ""
-    return f"""<h3 style="margin:18px 0 6px">Copying @{e(c['handle'])} (paper only)</h3>
-<p style="font-size:12px;color:#555;margin:0 0 6px">Every coin they buy is paper-bought at ${c['size']:.0f} within 10 minutes of
-their wallet showing it, then closed two ways: when <b>they</b> sell (or after {config.COPY_MAX_DAYS:.0f} days), and by <b>your</b> rules
-(+{config.TARGET_GAIN_PCT:.0f}% / -{config.STOP_LOSS_PCT:.0f}% / {config.TRACK_WINDOW_HOURS}h). Fees and slippage included. Watching {c['chains']}.
-Running {days:.1f} days · {c['open']} open: {holding}{unnamed}</p>
+    col = lambda v: "#0a7d38" if v > 0 else "#b00020" if v < 0 else "#111"
+    wr = lambda v: "-" if not v["n"] else f"{round(100 * v['wins'] / v['n'])}%"
+    rows = ""
+    for c in sorted(cs, key=lambda c: -c["their"]["pnl"]):
+        days = max(0.1, (time.time() - c["since"]) / 86400)
+        hold = ", ".join("$" + e(x) for x in c["holding"][:4]) or "-"
+        rows += (f"<tr><td>@{e(c['handle'])}<br><span style='color:#888;font-size:11px'>{days:.0f}d · open: {hold}</span></td>"
+                 f"<td>{c['their']['n']}</td><td>{wr(c['their'])}</td>"
+                 f"<td style='color:{col(c['their']['pnl'])}'><b>{_usd(c['their']['pnl'])}</b></td>"
+                 f"<td style='color:{col(c['yours']['pnl'])}'>{_usd(c['yours']['pnl'])}</td></tr>")
+    tot = sum(c["their"]["pnl"] for c in cs)
+    return f"""<h3 style="margin:18px 0 6px">Copy-trading books (paper only, ${cs[0]['size']:.0f} per buy)</h3>
+<p style="font-size:12px;color:#555;margin:0 0 6px">Every coin each trader buys is paper-bought within 10 minutes of their
+wallet showing it, then closed two ways: when <b>they</b> sell (or after {config.COPY_MAX_DAYS:.0f} days), and by <b>your</b> rules
+(+{config.TARGET_GAIN_PCT:.0f}% / -{config.STOP_LOSS_PCT:.0f}% / {config.TRACK_WINDOW_HOURS}h). Fees and slippage included. Solana, Base
+and Robinhood (BNB buys aren't visible for free). Last 30 days.</p>
 <table style="border-collapse:collapse;font-size:13px;width:100%" border="1" cellpadding="4">
-<tr style="background:#f3f3f3"><th>Exit style</th><th>Closed</th><th>Winners</th><th>Avg / trade</th><th>Total</th></tr>
-{row("Their exits", c["their"])}{row("Your rules", c["yours"])}</table>
-<p style="font-size:12px;color:#555">Last closed: {recent}</p>"""
+<tr style="background:#f3f3f3"><th>Trader</th><th>Closed</th><th>Winners</th><th>Their exits</th><th>Your rules</th></tr>
+{rows}<tr style="background:#f9f9f9"><td colspan="3"><b>All copied together</b></td>
+<td style="color:{col(tot)}"><b>{_usd(tot)}</b></td><td>{_usd(sum(c["yours"]["pnl"] for c in cs))}</td></tr></table>"""
 
 
 def learn_box(L):
@@ -175,6 +174,14 @@ Prices are checked every 10 min, so real fills will differ a little. {note}</p>
 <tr style="background:#f3f3f3"><th>Score</th><th>Trades</th><th>+50% hit</th><th>Stopped</th><th>Total P&amp;L</th><th>Avg / trade</th></tr>{rows}</table>"""
 
 
+def errors_note(s):
+    errs = s.get("scan_errors") or []
+    if not errs:
+        return ""
+    return (f"<span style='color:#b36b00'>Skipped this scan because of an error (the rest ran normally): "
+            f"{e('; '.join(errs))}</span><br>")
+
+
 def coverage(s):
     c = s.get("wallet_cov")
     if not c:
@@ -188,7 +195,7 @@ def coverage(s):
 def footer(s, stats):
     return f"""<p style="font-size:11px;color:#888">Checked {stats['traders']} traders (top 100 + {len(config.FOLLOW_TRADERS)} you follow) · {stats['events']} trader trades in {config.LOOKBACK_HOURS}h ·
 {stats['candidates']} coins seen{f" (incl. {stats['held']} top traders are holding)" if stats.get('held') else ''} ({e(' · '.join(f"{chains.LABEL.get(c, c)} {n[0]} seen/{n[1]} investable" for c, n in sorted((stats.get('by_chain') or {}).items())))}) · {stats['eligible']} passed the {_money(config.MIN_MCAP_USD)}+ market cap / liquidity / age filters · {stats['deep']} fully scored ({stats.get('fresh', stats['deep'])} refreshed this scan).<br>
-{coverage(s)}{e(reputation.summary(s))}<br>
+{coverage(s)}{errors_note(s)}{e(reputation.summary(s))}<br>
 {(e(watchlist.summary(s)) + '<br>') if watchlist.summary(s) else ''}
 Bankroll setting ${config.BANKROLL_USD:.0f} (update BANKROLL_USD as it changes). Budget: FOMO API {s['fomo_credits_used']:,}/{config.FOMO_MONTHLY_CREDITS:,} ·
 Helius {s['helius_credits_used']:,}/{config.HELIUS_MONTHLY_CREDITS:,} · X ${s['x_calls'] * 0.001:.2f}<br>

@@ -16,6 +16,7 @@ import logging
 import time
 
 from . import chains, config
+from . import http
 from .http import request
 from .solana import dedupe
 
@@ -27,11 +28,14 @@ class RPCError(Exception):
     pass
 
 
+BLOCK_TIME = {"base": 2.0, "bsc": 0.75, "robinhood": 0.25}   # seconds, only used as a fallback
+
+
 def rpc(chain, method, params):
     r = request("POST", config.EVM_RPC[chain], timeout=30,
                 json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
     if r is None:
-        raise RPCError(f"{chain} {method} failed")
+        raise RPCError(f"{chain} {method} failed {http.LAST_ERROR[0]}")
     d = r.json()
     if "error" in d:
         raise RPCError(f"{chain} {method}: {d['error']}")
@@ -63,8 +67,13 @@ def scan_chain(s, chain, traders):
     latest = int(rpc(chain, "eth_blockNumber", []), 16)
     older = rpc(chain, "eth_getBlockByNumber", [hex(latest - 1000), False])
     newer = rpc(chain, "eth_getBlockByNumber", [hex(latest), False])
-    block_time = max(0.05, (int(newer["timestamp"], 16) - int(older["timestamp"], 16)) / 1000)
-    now_ts = int(newer["timestamp"], 16)
+    if older and newer and older.get("timestamp") and newer.get("timestamp"):
+        block_time = max(0.05, (int(newer["timestamp"], 16) - int(older["timestamp"], 16)) / 1000)
+        now_ts = int(newer["timestamp"], 16)
+    else:
+        # some free RPCs return nothing for older blocks (that crashed the whole scan on Oct 1):
+        # fall back to the chain's typical block time
+        block_time, now_ts = BLOCK_TIME.get(chain, 2.0), time.time()
 
     start = s["evm_cursor"].get(chain)
     lookback = int(config.LOOKBACK_HOURS * 3600 / block_time)
@@ -137,6 +146,8 @@ def scan_wallets(s, traders):
             total += n
         except RPCError as e:
             log.info("%s log scan skipped: %s", chain, e)
+        except Exception:                              # one bad chain must never stop the scan
+            log.exception("%s log scan failed - skipped this scan", chain)
     dedupe(s)
     return total
 

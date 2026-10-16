@@ -1,7 +1,7 @@
-"""Shadow one FOMO trader: paper-trade everything they buy.
+"""Shadow FOMO traders: paper-trade everything they buy, one book per trader.
 
-A second, separate paper-trading book that ignores the scanner's scoring completely and
-just copies one person (COPY_TRADER, default ether_monk). It answers one question:
+Separate paper-trading books that ignore the scanner's scoring completely and just copy
+each person in COPY_TRADERS ($COPY_SIZE_USD per buy). They answer one question per trader:
 "would blindly following this trader have made money?"
 
 How it sees their trades without paying for a trade feed: every scan it reads what the
@@ -44,9 +44,19 @@ def named(sym):
     return (sym or "").strip() not in UNNAMED
 
 
-def _book(s):
-    b = s.setdefault("copy", {})
-    b.setdefault("handle", config.COPY_TRADER)
+def handles():
+    hs = list(config.COPY_TRADERS) or ([config.COPY_TRADER] if config.COPY_TRADER else [])
+    return list(dict.fromkeys(h.lstrip("@") for h in hs if h.strip()))
+
+
+def _book(s, handle=None):
+    handle = (handle or (handles() or [config.COPY_TRADER])[0]).lstrip("@")
+    books = s.setdefault("copies", {})
+    old = s.pop("copy", None)                     # the old single-trader book: keep its history
+    if old:
+        books.setdefault((old.get("handle") or config.COPY_TRADER).lstrip("@").lower(), old)
+    b = books.setdefault(handle.lower(), {})
+    b.setdefault("handle", handle)
     b.setdefault("wallets", {})
     b.setdefault("trades", [])
     b.setdefault("started", 0)
@@ -71,10 +81,10 @@ def _skip(chain, addr):
 
 
 # ------------------------------------------------------------------ whose wallets
-def wallets(s):
+def wallets(s, b=None):
     """Their Solana / EVM addresses: from your settings, the leaderboard, or the FOMO API."""
-    b = _book(s)
-    if config.COPY_SOLANA_WALLET or config.COPY_EVM_WALLET:
+    b = b or _book(s)
+    if (config.COPY_SOLANA_WALLET or config.COPY_EVM_WALLET) and b["handle"].lower() == config.COPY_TRADER.lower():
         b["wallets"] = {"solana": config.COPY_SOLANA_WALLET or None,
                         "evm": (config.COPY_EVM_WALLET or "").lower() or None}
         return b["wallets"]
@@ -90,6 +100,9 @@ def wallets(s):
     if f and (f.get("wallet") or f.get("evm")):
         b["wallets"] = {"solana": f.get("wallet"), "evm": f.get("evm")}
         return b["wallets"]
+    if time.time() - b.get("lookup_tried", 0) < 48 * 3600:
+        return b["wallets"]
+    b["lookup_tried"] = time.time()
     from .fomo import _get                                            # 2,500 credits, once
     d = _get(s, f"/v2/users/{handle}", 2500)
     w = ((d or {}).get("user") or d or {}).get("wallets") or {}
@@ -173,9 +186,26 @@ def _close(part, t, how, price, now):
 
 
 def scan(s):
-    """One pass: spot their buys and sells, then move every open paper trade along."""
-    b = _book(s)
-    w = wallets(s)
+    """One pass over every copied trader. One trader failing never stops the others."""
+    opened, looked = [], 0
+    for h in handles():
+        b = _book(s, h)
+        if not (b["wallets"].get("solana") or b["wallets"].get("evm")):
+            if looked >= 2:              # wallet lookups cost 2,500 FOMO credits: 2 per scan
+                continue
+            looked += 1
+        try:
+            opened += scan_one(s, b)
+        except Exception:
+            log.exception("copy: %s failed this scan", h)
+    keep = {h.lower() for h in handles()}
+    s["copies"] = {k: v for k, v in (s.get("copies") or {}).items() if k in keep}
+    return opened
+
+
+def scan_one(s, b):
+    """Spot one trader's buys and sells, then move their open paper trades along."""
+    w = wallets(s, b)
     if not (w.get("solana") or w.get("evm")):
         return []
     now = time.time()
@@ -262,8 +292,19 @@ def label(t):
     return f"{a[:4]}..{a[-4:]}"
 
 
-def summary(s, days=30):
-    b = s.get("copy") or {}
+def summaries(s, days=30):
+    """One summary per copied trader (only those whose book has started)."""
+    out = []
+    for h in handles():
+        c = summary(s, days, (s.get("copies") or {}).get(h.lower()))
+        if c:
+            out.append(c)
+    return out
+
+
+def summary(s, days=30, b=None):
+    if b is None:
+        b = next(iter((s.get("copies") or {}).values()), None) or s.get("copy") or {}
     ts = [t for t in (b.get("trades") or []) if t["ts"] >= time.time() - days * 86400]
     if not b.get("started"):
         return None
