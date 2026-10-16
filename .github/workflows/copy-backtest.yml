@@ -1,0 +1,48 @@
+name: Copy-trade backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      traders:
+        description: "FOMO handles, comma separated"
+        required: true
+        default: "bystevenr,mickeymantled,frankdegods,tjr,brezscales,ether_monk"
+      days:
+        description: "How many days back"
+        required: true
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Backtest copying them
+        env:
+          FOMO_API_KEY: ${{ secrets.FOMO_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          COPY_SIZE_USD: ${{ vars.COPY_SIZE_USD }}
+          TRADERS: ${{ inputs.traders }}
+          DAYS: ${{ inputs.days }}
+        run: python -m scanner.copyback "$TRADERS" "$DAYS"
+
+      - name: Save the full data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: copy-backtest
+          path: out/copyback.*
+          if-no-files-found: ignore
