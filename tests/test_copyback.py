@@ -196,3 +196,33 @@ asked.clear()
 copyback.run("bigtrader", 30)                               # already complete: only the newest page
 assert asked == ["start"], asked
 print("resumable history OK")
+
+# FOMO won't load their newest page on a later run: skip it and keep digging back from the bookmark
+copyback.time.sleep = lambda x: None
+PAGES2 = {"start": ([mk(11, 1), mk(12, 2)], "b"), "b": ([mk(13, 8)], "c"), "c": ([mk(14, 20)], "d"),
+          "d": ([mk(15, 29), mk(16, 33)], None)}
+asked.clear()
+fail_start = [False]
+
+
+def fake5(method, url, params=None, **kw):
+    if "/users/stall/positions" in url:
+        cur = (params or {}).get("cursor", "start")
+        asked.append(cur)
+        if cur == "start" and fail_start[0]:
+            http.LAST_ERROR[0] = '503 {"error":"FOMO did not answer in time","retryAfterSeconds":25}'
+            return None
+        trades, nxt = PAGES2[cur]
+        return demo.Resp({"trades": trades, "cursor": cur, "nextCursor": nxt}, {"x-credits-cost": "250"})
+    return orig(method, url, params=params, **kw)
+
+
+fomo.request = fake5
+copyback.MAX_PAGES = 2
+copyback.run("stall", 30)                     # gets start + b, bookmark -> c
+copyback.MAX_PAGES = 200
+fail_start[0] = True
+asked.clear()
+copyback.run("stall", 30)
+assert asked[-2:] == ["c", "d"] and copyback.DIAG["stall"]["complete"], (asked, copyback.DIAG["stall"])
+print("skips a stalled newest page and keeps digging OK")

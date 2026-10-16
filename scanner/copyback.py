@@ -114,14 +114,15 @@ def snapshot(d):
             and bool(d.get("stale") or d.get("capturedAt") or "ageSeconds" in d))
 
 
-def fetch_page(s, handle, cursor, diag, tries=4):
+def fetch_page(s, handle, cursor, diag, tries=5):
     """One page of their history. When FOMO is busy the API says "did not answer in time, retry in
     25s" or hands back a saved 50-trade snapshot - so wait as asked and try again a few times."""
     path, last = f"/v2/users/{handle}/positions", None
     for attempt in range(tries):
         if _DEADLINE[0] and time.time() > _DEADLINE[0]:
             break
-        params = {"cursor": cursor, "limit": 100} if attempt < tries - 1 or cursor != "start" else None
+        # no page-size option: asking for 100 at a time made FOMO's side slower and time out more
+        params = {"cursor": cursor} if attempt < tries - 1 or cursor != "start" else None
         d = _get(s, path, 250, params, required=True, timeout=90)
         if d is None:
             err = http.LAST_ERROR[0]
@@ -193,10 +194,23 @@ def history(s, handle, since, cache=None):
         d = fetch_page(s, handle, cursor, diag)
         diag["pages"] += 1
         if d is None:
-            diag["error"] = explain(http.LAST_ERROR[0])
-            if cursor not in ("start", None) and not catching_up and not http.LAST_ERROR[0].startswith(RETRYABLE):
+            err = http.LAST_ERROR[0]
+            diag["error"] = explain(err)
+            if catching_up and resume:
+                # their newest page won't load - skip it and keep digging further back, which is what
+                # the run is for (the newest trades get picked up next time)
+                catching_up, cursor = False, resume
+                diag["skipped_newest"] = True
+                continue
+            if err.startswith(RETRYABLE):
+                fails = diag["fails"] = diag.get("fails", 0) + 1
+                if fails < 6:                         # FOMO says the bookmark stays valid: rest, retry
+                    time.sleep(60)
+                    continue
+            elif cursor not in ("start", None) and not catching_up:
                 ent["cursor"] = None                  # a stale bookmark: start over next run
             break
+        diag["fails"] = 0
         if diag["pages"] == 1:
             diag["top_keys"] = sorted(d)[:12] if isinstance(d, dict) else f"list of {len(d)}"
         if isinstance(d, dict) and d.get("available") is False:
