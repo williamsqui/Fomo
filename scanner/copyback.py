@@ -32,8 +32,8 @@ from .tracker import trade_pnl
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("copyback")
 e = report.e
-MAX_PAGES = int(os.getenv("COPYBACK_PAGES") or 40)            # 250 FOMO credits each
-MAX_SECONDS = int(os.getenv("COPYBACK_MAX_SECONDS") or 420)   # stop paging in time to send the email
+MAX_PAGES = int(os.getenv("COPYBACK_PAGES") or 200)           # 250 FOMO credits each
+MAX_SECONDS = int(os.getenv("COPYBACK_MAX_SECONDS") or 420)   # the workflow sets ~25 min   # stop paging in time to send the email
 _DEADLINE = [0.0]
 
 
@@ -142,18 +142,60 @@ def fetch_page(s, handle, cursor, diag, tries=4):
     return None
 
 
-def history(s, handle, since):
-    """Their positions opened since `since` (pages until older than that, max MAX_PAGES)."""
-    out, cursor, diag = [], "start", {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
+CACHE = os.getenv("COPYBACK_CACHE") or "cbcache/history.json"
+
+
+def load_cache():
+    try:
+        with open(CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_cache(c):
+    os.makedirs(os.path.dirname(CACHE) or ".", exist_ok=True)
+    with open(CACHE + ".tmp", "w") as f:
+        json.dump(c, f)
+    os.replace(CACHE + ".tmp", CACHE)
+
+
+def _key(p):
+    return p.get("tradeId") or f"{(p.get('token') or {}).get('address')}|{opened(p)}"
+
+
+def _closed(page):
+    return [p for p in page if str(p.get("status") or "").lower() == "closed" and opened(p)]
+
+
+def history(s, handle, since, cache=None):
+    """Every position they opened since `since`.
+
+    Very active traders (Mickey: ~45 trades a day, 25 per page) need 50+ pages for 30 days and FOMO
+    often stalls part-way, so progress is SAVED between runs: each run first fetches their newest
+    pages until it meets trades it already has, then carries on further back from where the last
+    run stopped. Run it again until the email says "complete"."""
+    cache = cache if cache is not None else {}
+    diag = {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
     DIAG[handle] = diag
+    ent = cache.get(handle.lower())
+    if (not ent or ent.get("since", 0) > since + 3600 or time.time() - ent.get("updated", 0) > 3 * 86400):
+        ent = {"positions": {}, "cursor": None, "done": False, "since": since, "updated": time.time()}
+    cache[handle.lower()] = ent
+    pos = ent["positions"]
+    had = bool(pos)
+    resume = ent.get("cursor") if not ent.get("done") else None
+    cursor, catching_up = "start", had          # catching up = re-reading their newest pages
     for _ in range(MAX_PAGES):
         if _DEADLINE[0] and time.time() > _DEADLINE[0]:
-            diag["partial"] = "ran out of time - history only partly fetched"
+            diag["partial"] = "ran out of time this run"
             break
         d = fetch_page(s, handle, cursor, diag)
         diag["pages"] += 1
         if d is None:
             diag["error"] = explain(http.LAST_ERROR[0])
+            if cursor not in ("start", None) and not catching_up and not http.LAST_ERROR[0].startswith(RETRYABLE):
+                ent["cursor"] = None                  # a stale bookmark: start over next run
             break
         if diag["pages"] == 1:
             diag["top_keys"] = sorted(d)[:12] if isinstance(d, dict) else f"list of {len(d)}"
@@ -162,35 +204,56 @@ def history(s, handle, since):
             break
         if snapshot(d):
             diag["partial"] = ("FOMO was too busy to send their live history, so this is only its saved "
-                               "snapshot of their latest ~50 trades - run it again later for the full period")
+                               "snapshot of their latest ~50 trades")
         page = _positions(d)
         if page and "fields" not in diag:
             diag["fields"] = sorted(page[0])[:25]
-        out += page
+        closed = _closed(page)
+        overlap = bool(closed) and all(_key(p) in pos for p in closed)
+        for p in page:
+            pos[_key(p)] = p                          # newest data wins (prices, status)
         nxt = d.get("nextCursor") if isinstance(d, dict) else None
-        # Page 1 holds ALL their open positions (some opened months ago) plus the newest closed
-        # trades, so only the CLOSED trades tell us how far back we've reached. (Judging by every
-        # trade on the page stopped Mickey's history after his last ~10 hours.)
-        closed = [opened(p) for p in page if str(p.get("status") or "").lower() == "closed"]
-        closed = [x for x in closed if x]
-        if closed:
-            diag["back_to"] = min(closed + [diag.get("back_to") or closed[0]])
-        if not nxt or nxt == cursor or not page or (closed and min(closed) < since):
+        dates = [opened(p) for p in closed]
+        reached_end = not nxt or nxt == cursor or not page or (dates and min(dates) < since)
+        if catching_up and (overlap or reached_end):
+            catching_up = False
+            if ent.get("done") or not resume:         # older part already complete / nothing to resume
+                if ent.get("done") or reached_end:
+                    break
+            else:
+                cursor = resume                       # carry on further back from last run
+                ent["updated"] = time.time()
+                save_cache(cache) if cache is not None else None
+                continue
+        if reached_end:
+            ent["done"], ent["cursor"] = True, None
             break
         cursor = nxt
-    diag["fetched"] = len(out)
-    seen, uniq = set(), []
-    for p in out:
+        if not catching_up:
+            ent["cursor"] = nxt                       # bookmark: where the next run continues
+        ent["updated"] = time.time()
+        if cache is not None:
+            save_cache(cache)
+    ent["updated"] = time.time()
+    save_cache(cache)
+    alls = list(pos.values())
+    closed_all = [opened(p) for p in _closed(alls)]
+    if closed_all:
+        diag["back_to"] = min(closed_all)
+    diag["complete"] = bool(ent.get("done"))
+    if not ent.get("done") and "partial" not in diag:
+        diag["partial"] = "not all of the period fetched yet"
+    if not ent.get("done"):
+        diag["partial"] += " - progress is saved: run the backtest again to continue further back"
+    diag["fetched"] = len(alls)
+    uniq = []
+    for p in alls:
         t = opened(p)
         if t is None:
             diag["no_date"] += 1
-            continue
-        if t < since:
+        elif t < since:
             diag["too_old"] += 1
-            continue
-        k = p.get("tradeId") or ((p.get("token") or {}).get("address"), t)
-        if k not in seen:
-            seen.add(k)
+        else:
             uniq.append(p)
     return uniq
 
@@ -279,7 +342,8 @@ def diag_html():
     for h, d in DIAG.items():
         sk = "; ".join(f"{k}: {v}" for k, v in (SKIP.get(h) or {}).items()) or "-"
         back = (datetime.fromtimestamp(d["back_to"], timezone.utc).strftime("%b %d") if d.get("back_to") else "-")
-        rows += (f"<tr><td>@{e(h)}<br>back to {back} · {d.get('pages', 0)} pages"
+        state = "<b style='color:#0a7d38'>complete</b>" if d.get("complete") else "in progress"
+        rows += (f"<tr><td>@{e(h)}<br>{state} · back to {back} · {d.get('pages', 0)} pages this run"
                  f"{'<br><b>' + e(d['partial']) + '</b>' if d.get('partial') else ''}</td>"
                  f"<td>{d.get('fetched', 0)}</td><td>{d.get('too_old', 0)}</td>"
                  f"<td>{d.get('no_date', 0)}</td><td>{e(sk)}</td>"
@@ -355,10 +419,11 @@ def run(handles=None, days=None):
     size, lag = config.COPY_SIZE_USD, config.COPY_LAG_PCT
     since = time.time() - days * 86400
     s = st.load()
+    cache = load_cache()
     results = {}
     for h in handles:
         try:
-            ps = history(s, h, since)
+            ps = history(s, h, since, cache)
         except Exception:
             log.exception("history failed for %s", h)
             ps = None

@@ -38,6 +38,9 @@ def fake(method, url, params=None, **kw):
     return orig(method, url, params=params, **kw)
 
 
+copyback.CACHE = "out/cb_cache_test.json"
+if os.path.exists(copyback.CACHE):
+    os.remove(copyback.CACHE)
 fomo.request = fake
 mail = []
 report.send = lambda subj, body: mail.append((subj, body)) or True
@@ -153,3 +156,43 @@ rows = {r["symbol"] for r in __import__("csv").DictReader(open("out/copyback.csv
 assert rows == {"LIVE"} and not copyback.DIAG["busyguy"].get("partial"), (rows, copyback.DIAG["busyguy"])
 assert copyback._retry_after('503 {"retryAfterSeconds": 25}') == 25
 print("busy-API retries OK")
+
+# a huge history across runs: run 1 stops after 2 pages (time), run 2 re-reads the newest page,
+# sees it already has those trades, jumps to the saved bookmark and finishes. Nothing fetched twice
+# except page 1, and the email says "complete" only at the end.
+def mk(i, days_ago):
+    return {"tradeId": f"t{i}", "token": {"symbol": f"C{i}"}, "status": "closed", "avgEntryPrice": 1,
+            "avgExitPrice": 1.5, "costBasisUsd": 20, "createdAt": iso(NOW - days_ago * 86400),
+            "closedAt": iso(NOW - days_ago * 86400 + 600)}
+
+
+PAGES = {"start": ([mk(1, 1), mk(2, 2)], "b"), "b": ([mk(3, 8), mk(4, 12)], "c"),
+         "c": ([mk(5, 18), mk(6, 24)], "d"), "d": ([mk(7, 29), mk(8, 35)], None)}
+asked = []
+
+
+def fake4(method, url, params=None, **kw):
+    if "/users/bigtrader/positions" in url:
+        cur = (params or {}).get("cursor", "start")
+        asked.append(cur)
+        trades, nxt = PAGES[cur]
+        return demo.Resp({"trades": trades, "cursor": cur, "nextCursor": nxt}, {"x-credits-cost": "250"})
+    return orig(method, url, params=params, **kw)
+
+
+fomo.request = fake4
+copyback.MAX_PAGES = 2
+copyback.run("bigtrader", 30)
+assert asked == ["start", "b"] and not copyback.DIAG["bigtrader"]["complete"], (asked, copyback.DIAG["bigtrader"])
+assert "run the backtest again to continue" in mail[-1][1]
+asked.clear()
+copyback.MAX_PAGES = 200
+copyback.run("bigtrader", 30)
+assert asked == ["start", "c", "d"], asked
+got = {r["symbol"] for r in __import__("csv").DictReader(open("out/copyback.csv"))}
+assert got == {f"C{i}" for i in range(1, 8)}, got          # C8 is 35 days old
+assert copyback.DIAG["bigtrader"]["complete"] and "complete" in mail[-1][1]
+asked.clear()
+copyback.run("bigtrader", 30)                               # already complete: only the newest page
+assert asked == ["start"], asked
+print("resumable history OK")
