@@ -6,11 +6,15 @@ on:
       traders:
         description: "FOMO handles, comma separated"
         required: true
-        default: "bystevenr,mickeymantled,frankdegods,tjr,brezscales,ether_monk"
+        default: "mickeymantled,bystevenr,frankdegods,tjr,brezscales,ether_monk"
       days:
         description: "How many days back"
         required: true
         default: "30"
+
+concurrency:
+  group: copy-backtest
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -18,7 +22,7 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -26,6 +30,14 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+
+      # trade history fetched by earlier runs - each run carries on where the last one stopped
+      - name: Restore fetched history
+        uses: actions/cache/restore@v4
+        with:
+          path: cbcache
+          key: copyback-${{ github.run_id }}
+          restore-keys: copyback-
 
       - name: Backtest copying them
         env:
@@ -35,9 +47,17 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           TIMEZONE: ${{ vars.TIMEZONE }}
           COPY_SIZE_USD: ${{ vars.COPY_SIZE_USD }}
+          COPYBACK_MAX_SECONDS: "1500"
           TRADERS: ${{ inputs.traders }}
           DAYS: ${{ inputs.days }}
         run: python -m scanner.copyback "$TRADERS" "$DAYS"
+
+      - name: Save fetched history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cbcache
+          key: copyback-${{ github.run_id }}
 
       - name: Save the full data
         if: always()
