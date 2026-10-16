@@ -86,3 +86,33 @@ http.SESSION.request = lambda *a, **k: R402()
 copyback.run("mickeymantled", 30)
 assert "credits for this month are used up" in mail[-1][1], mail[-1][1][-800:]
 print("API errors explained OK")
+
+# page 1 = all OPEN positions (one opened 3 months ago) + newest closed; older closed on page 2.
+# The old code saw the 3-month-old open trade and stopped after page 1 (Mickey's "only 10 hours").
+P1 = [{"tradeId": "o1", "token": {"symbol": "OLDBAG"}, "status": "open", "avgEntryPrice": 1, "priceUsd": 1,
+       "costBasisUsd": 20, "createdAt": iso(NOW - 90 * 86400)},
+      {"tradeId": "c1", "token": {"symbol": "NEW"}, "status": "closed", "avgEntryPrice": 1, "avgExitPrice": 2,
+       "costBasisUsd": 20, "createdAt": iso(NOW - 3600), "closedAt": iso(NOW - 1800)}]
+P2 = [{"tradeId": "c2", "token": {"symbol": "WEEKOLD"}, "status": "closed", "avgEntryPrice": 1, "avgExitPrice": 3,
+       "costBasisUsd": 20, "createdAt": iso(NOW - 7 * 86400), "closedAt": iso(NOW - 6 * 86400)}]
+P3 = [{"tradeId": "c3", "token": {"symbol": "ANCIENT"}, "status": "closed", "avgEntryPrice": 1, "avgExitPrice": 3,
+       "costBasisUsd": 20, "createdAt": iso(NOW - 40 * 86400), "closedAt": iso(NOW - 39 * 86400)}]
+
+
+def fake3(method, url, params=None, **kw):
+    if "/users/pager/positions" in url:
+        cur = (params or {}).get("cursor")
+        if cur == "start":
+            return demo.Resp({"trades": P1, "cursor": "start", "nextCursor": "p2"}, {"x-credits-cost": "250"})
+        if cur == "p2":
+            return demo.Resp({"trades": P2, "cursor": "p2", "nextCursor": "p3"}, {"x-credits-cost": "250"})
+        return demo.Resp({"trades": P3, "cursor": "p3", "nextCursor": None}, {"x-credits-cost": "250"})
+    return orig(method, url, params=params, **kw)
+
+
+fomo.request = fake3
+copyback.run("pager", 30)
+rows = {r["symbol"] for r in __import__("csv").DictReader(open("out/copyback.csv"))}
+assert {"NEW", "WEEKOLD"} <= rows and "ANCIENT" not in rows and "OLDBAG" not in rows, rows
+assert copyback.DIAG["pager"]["pages"] == 3, copyback.DIAG["pager"]
+print("paging past old open positions OK")

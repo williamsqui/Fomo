@@ -31,7 +31,9 @@ from .tracker import trade_pnl
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(name)s %(message)s")
 log = logging.getLogger("copyback")
 e = report.e
-MAX_PAGES = int(os.getenv("COPYBACK_PAGES") or 6)
+MAX_PAGES = int(os.getenv("COPYBACK_PAGES") or 40)            # 250 FOMO credits each
+MAX_SECONDS = int(os.getenv("COPYBACK_MAX_SECONDS") or 420)   # stop paging in time to send the email
+_DEADLINE = [0.0]
 
 
 DIAG = {}   # handle -> what the API actually returned (shown in the email, so a blank result explains itself)
@@ -98,6 +100,9 @@ def history(s, handle, since):
     out, cursor, diag = [], "start", {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
     DIAG[handle] = diag
     for _ in range(MAX_PAGES):
+        if _DEADLINE[0] and time.time() > _DEADLINE[0]:
+            diag["partial"] = "ran out of time - history only partly fetched"
+            break
         # a very active trader's history is assembled live by the API and can take a while
         d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True,
                  timeout=90)
@@ -120,11 +125,17 @@ def history(s, handle, since):
         if page and "fields" not in diag:
             diag["fields"] = sorted(page[0])[:25]
         out += page
-        cursor = d.get("nextCursor") or d.get("cursor") if isinstance(d, dict) else None
-        dates = [opened(p) for p in page]
-        dates = [x for x in dates if x]
-        if not cursor or not page or (dates and min(dates) < since):
+        nxt = d.get("nextCursor") if isinstance(d, dict) else None
+        # Page 1 holds ALL their open positions (some opened months ago) plus the newest closed
+        # trades, so only the CLOSED trades tell us how far back we've reached. (Judging by every
+        # trade on the page stopped Mickey's history after his last ~10 hours.)
+        closed = [opened(p) for p in page if str(p.get("status") or "").lower() == "closed"]
+        closed = [x for x in closed if x]
+        if closed:
+            diag["back_to"] = min(closed + [diag.get("back_to") or closed[0]])
+        if not nxt or nxt == cursor or not page or (closed and min(closed) < since):
             break
+        cursor = nxt
     diag["fetched"] = len(out)
     seen, uniq = set(), []
     for p in out:
@@ -225,7 +236,10 @@ def diag_html():
     rows = ""
     for h, d in DIAG.items():
         sk = "; ".join(f"{k}: {v}" for k, v in (SKIP.get(h) or {}).items()) or "-"
-        rows += (f"<tr><td>@{e(h)}</td><td>{d.get('fetched', 0)}</td><td>{d.get('too_old', 0)}</td>"
+        back = (datetime.fromtimestamp(d["back_to"], timezone.utc).strftime("%b %d") if d.get("back_to") else "-")
+        rows += (f"<tr><td>@{e(h)}<br>back to {back} · {d.get('pages', 0)} pages"
+                 f"{'<br><b>' + e(d['partial']) + '</b>' if d.get('partial') else ''}</td>"
+                 f"<td>{d.get('fetched', 0)}</td><td>{d.get('too_old', 0)}</td>"
                  f"<td>{d.get('no_date', 0)}</td><td>{e(sk)}</td>"
                  f"<td style='font-size:10px'>{e(d.get('error') or '')} {e(str(d.get('top_keys', '')))}<br>"
                  f"{e(', '.join(d.get('fields') or []))}</td></tr>")
@@ -287,6 +301,7 @@ Full data: out/copyback.csv in this run's Artifacts. Not financial advice.</p></
 
 
 def run(handles=None, days=None):
+    _DEADLINE[0] = time.time() + MAX_SECONDS
     handles = [h.strip().lstrip("@") for h in (handles or ",".join(config.COPY_TRADERS)).split(",") if h.strip()]
     days = int(days or config.COPY_BACKTEST_DAYS)
     size, lag = config.COPY_SIZE_USD, config.COPY_LAG_PCT
