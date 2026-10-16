@@ -116,3 +116,40 @@ rows = {r["symbol"] for r in __import__("csv").DictReader(open("out/copyback.csv
 assert {"NEW", "WEEKOLD"} <= rows and "ANCIENT" not in rows and "OLDBAG" not in rows, rows
 assert copyback.DIAG["pager"]["pages"] == 3, copyback.DIAG["pager"]
 print("paging past old open positions OK")
+
+# FOMO busy: first a 503 "retry in 25s", then the saved snapshot, then the live page -> live data used
+copyback.time.sleep = lambda x: None
+calls = {"n": 0}
+LIVE = {"trades": [{"tradeId": "z", "token": {"symbol": "LIVE"}, "status": "closed", "avgEntryPrice": 1,
+                    "avgExitPrice": 2, "costBasisUsd": 20, "createdAt": iso(NOW - 3600), "closedAt": iso(NOW - 60)}],
+        "nextCursor": None, "source": "live-fomo"}
+SNAP = {"trades": [], "stale": True, "ageSeconds": 900, "source": "captured"}
+
+
+class R503:
+    ok, status_code, headers = False, 503, {}
+    text = '{"error":"FOMO did not answer in time","retryable":true,"retryAfterSeconds":25}'
+
+
+class ROK:
+    ok, status_code = True, 200
+
+    def __init__(self, d):
+        self.d, self.headers = d, {"x-credits-cost": "250"}
+
+    def json(self):
+        return self.d
+
+
+def busy(method, url, **kw):
+    calls["n"] += 1
+    return R503() if calls["n"] == 1 else ROK(SNAP) if calls["n"] == 2 else ROK(LIVE)
+
+
+fomo.request = http.request
+http.SESSION.request = busy
+copyback.run("busyguy", 30)
+rows = {r["symbol"] for r in __import__("csv").DictReader(open("out/copyback.csv"))}
+assert rows == {"LIVE"} and not copyback.DIAG["busyguy"].get("partial"), (rows, copyback.DIAG["busyguy"])
+assert copyback._retry_after('503 {"retryAfterSeconds": 25}') == 25
+print("busy-API retries OK")

@@ -17,6 +17,7 @@ coins they received or sent instead of buying are skipped; one month is a short 
 the people you pick to copy are usually the ones who just had a good month.
 """
 import csv
+import json
 import logging
 import os
 import sys
@@ -95,6 +96,52 @@ def _positions(d):
     return _positions(inner) if inner is not None else []
 
 
+RETRYABLE = ("429", "500", "502", "503", "504", "timeout/network:")
+
+
+def _retry_after(err):
+    """Seconds the API asked us to wait ("retryAfterSeconds": 25), else 25. Capped at 60."""
+    try:
+        body = json.loads(err.split(" ", 1)[1])
+        return min(60, max(5, int(body.get("retryAfterSeconds") or 25)))
+    except (IndexError, ValueError, TypeError, AttributeError):
+        return 25
+
+
+def snapshot(d):
+    """The API's saved fallback copy (sent when FOMO itself is too busy): ~50 trades, no paging."""
+    return (isinstance(d, dict) and not d.get("nextCursor")
+            and bool(d.get("stale") or d.get("capturedAt") or "ageSeconds" in d))
+
+
+def fetch_page(s, handle, cursor, diag, tries=4):
+    """One page of their history. When FOMO is busy the API says "did not answer in time, retry in
+    25s" or hands back a saved 50-trade snapshot - so wait as asked and try again a few times."""
+    path, last = f"/v2/users/{handle}/positions", None
+    for attempt in range(tries):
+        if _DEADLINE[0] and time.time() > _DEADLINE[0]:
+            break
+        params = {"cursor": cursor, "limit": 100} if attempt < tries - 1 or cursor != "start" else None
+        d = _get(s, path, 250, params, required=True, timeout=90)
+        if d is None:
+            err = http.LAST_ERROR[0]
+            diag["retries"] = diag.get("retries", 0) + 1
+            if not err.startswith(RETRYABLE) or attempt == tries - 1:
+                return None
+            log.info("%s: FOMO busy (%s) - waiting %ss", handle, err[:40], _retry_after(err))
+            time.sleep(_retry_after(err))
+            continue
+        if snapshot(d) and attempt < tries - 1:
+            last = d                                  # keep it in case FOMO never answers live
+            diag["retries"] = diag.get("retries", 0) + 1
+            time.sleep(20)
+            continue
+        return d
+    if last is not None:
+        return last
+    return None
+
+
 def history(s, handle, since):
     """Their positions opened since `since` (pages until older than that, max MAX_PAGES)."""
     out, cursor, diag = [], "start", {"pages": 0, "fetched": 0, "too_old": 0, "no_date": 0}
@@ -103,15 +150,7 @@ def history(s, handle, since):
         if _DEADLINE[0] and time.time() > _DEADLINE[0]:
             diag["partial"] = "ran out of time - history only partly fetched"
             break
-        # a very active trader's history is assembled live by the API and can take a while
-        d = _get(s, f"/v2/users/{handle}/positions", 250, {"cursor": cursor, "limit": 100}, required=True,
-                 timeout=90)
-        if d is None and diag["pages"] == 0:
-            first_err = http.LAST_ERROR[0]
-            time.sleep(4)                                 # free keys: 20 requests a minute
-            d = _get(s, f"/v2/users/{handle}/positions", 250, None, required=True, timeout=90)   # plain
-            if d is None:
-                http.LAST_ERROR[0] = http.LAST_ERROR[0] or first_err
+        d = fetch_page(s, handle, cursor, diag)
         diag["pages"] += 1
         if d is None:
             diag["error"] = explain(http.LAST_ERROR[0])
@@ -121,6 +160,9 @@ def history(s, handle, since):
         if isinstance(d, dict) and d.get("available") is False:
             diag["error"] = "FOMO API says this trader's history isn't available"
             break
+        if snapshot(d):
+            diag["partial"] = ("FOMO was too busy to send their live history, so this is only its saved "
+                               "snapshot of their latest ~50 trades - run it again later for the full period")
         page = _positions(d)
         if page and "fields" not in diag:
             diag["fields"] = sorted(page[0])[:25]
@@ -259,12 +301,18 @@ def build_email(results, size, days, lag):
         if rows is None:
             body_rows += f"<tr><td>@{e(h)}</td><td colspan='7'>no trade history from the FOMO API</td></tr>"
             continue
+        if not rows and DIAG.get(h, {}).get("error"):
+            body_rows += (f"<tr><td>@{e(h)}</td><td colspan='7' style='color:#b36b00'>couldn't get their history: "
+                          f"{e(DIAG[h]['error'].split(' [')[0])}</td></tr>")
+            continue
         t = tally(rows, size)
         all_rows += rows
         wr = f"{round(100 * t['wins_lag'] / t['n'])}%" if t["n"] else "-"
         best = f"${e(t['best']['symbol'])} {usd(t['best']['pnl'])}" if t["best"] else "-"
         worst = f"${e(t['worst']['symbol'])} {usd(t['worst']['pnl'])}" if t["worst"] else "-"
-        body_rows += (f"<tr><td>@{e(h)}</td><td>{t['n']}</td><td>{wr}</td>"
+        part = DIAG.get(h, {}).get("partial")
+        flag = "<br><span style='color:#b36b00;font-size:11px'>partial data - see below</span>" if part else ""
+        body_rows += (f"<tr><td>@{e(h)}{flag}</td><td>{t['n']}</td><td>{wr}</td>"
                       f"<td style='color:{col(t['pnl'])}'>{usd(t['pnl'])}</td>"
                       f"<td style='color:{col(t['pnl_lag'])}'><b>{usd(t['pnl_lag'])}</b></td>"
                       f"<td>${t['capital']:,.0f}<br><span style='font-size:11px;color:#888'>{t['peak']} at once</span></td>"
